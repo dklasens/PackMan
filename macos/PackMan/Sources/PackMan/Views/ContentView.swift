@@ -1,14 +1,16 @@
+import AppKit
 import SwiftUI
 
 struct ContentView: View {
     @State private var viewModel = AppViewModel()
+    @State private var selection: Set<String> = []
 
     var body: some View {
         @Bindable var viewModel = viewModel
 
         VStack(spacing: 0) {
-            Table(viewModel.packages, sortOrder: $viewModel.sortOrder) {
-                TableColumn("") { package in
+            Table(of: PackageUpdate.self, selection: $selection, sortOrder: $viewModel.sortOrder) {
+                TableColumn("") { (package: PackageUpdate) in
                     Toggle("", isOn: Binding(
                         get: { package.isSelected },
                         set: { package.isSelected = $0 }))
@@ -24,10 +26,49 @@ struct ContentView: View {
                 TableColumn("Available", value: \.availableVersion)
                     .width(ideal: 100)
 
-                TableColumn("Status", value: \.status.rawValue) { package in
+                TableColumn("Status", value: \.status.rawValue) { (package: PackageUpdate) in
                     StatusCell(status: package.status, message: package.statusMessage)
                 }
                 .width(90)
+            } rows: {
+                ForEach(viewModel.packages) { package in
+                    TableRow(package)
+                        .contextMenu {
+                            Button {
+                                Task { await viewModel.updateSingle(package) }
+                            } label: {
+                                Label("Update \(package.name)", systemImage: "arrow.down.circle")
+                            }
+                            .disabled(viewModel.isBusy || package.status == .updating)
+
+                            Divider()
+
+                            Button {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(package.packageID, forType: .string)
+                            } label: {
+                                Label("Copy Package ID", systemImage: "doc.on.doc")
+                            }
+                        }
+                }
+            }
+            .onChange(of: viewModel.sortOrder) { _, _ in
+                viewModel.applySort()
+            }
+            .overlay {
+                if viewModel.packages.isEmpty && !viewModel.isBusy {
+                    if viewModel.hasScanned {
+                        ContentUnavailableView(
+                            "System is Up to Date",
+                            systemImage: "checkmark.circle",
+                            description: Text("No updates were found across your enabled sources."))
+                    } else {
+                        ContentUnavailableView(
+                            "No Scan Yet",
+                            systemImage: "arrow.clockwise.circle",
+                            description: Text("Click Scan to check for updates."))
+                    }
+                }
             }
             .padding(.horizontal, 16)
             .padding(.top, 8)
@@ -70,6 +111,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(viewModel.isBusy)
+                .keyboardShortcut("u", modifiers: .command)
                 .help("Update all checked packages")
             }
 
@@ -110,10 +152,20 @@ private struct StatusCell: View {
     let message: String?
 
     var body: some View {
-        HStack(spacing: 4) {
-            if status == .updating {
+        HStack(spacing: 5) {
+            switch status {
+            case .pending:
+                Image(systemName: "clock")
+                    .foregroundStyle(.secondary)
+            case .updating:
                 ProgressView()
                     .controlSize(.mini)
+            case .succeeded:
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            case .failed:
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
             }
             Text(status.rawValue)
                 .foregroundStyle(color)

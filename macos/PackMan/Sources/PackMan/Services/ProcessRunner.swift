@@ -96,6 +96,10 @@ enum ProcessRunner {
     }
 
     static func resolve(_ name: String, knownPaths: [String] = []) async -> String? {
+        await ToolPathCache.shared.resolve(name, knownPaths: knownPaths)
+    }
+
+    fileprivate static func uncachedResolve(_ name: String, knownPaths: [String]) async -> String? {
         for path in knownPaths where FileManager.default.isExecutableFile(atPath: path) {
             return path
         }
@@ -109,6 +113,24 @@ enum ProcessRunner {
             .split(separator: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+}
+
+/// Tool locations never change during an app run; avoid re-spawning `which`
+/// for every scan and update. (Newly installed tools are picked up on relaunch.)
+private actor ToolPathCache {
+    static let shared = ToolPathCache()
+
+    private var cache: [String: String?] = [:]
+
+    func resolve(_ name: String, knownPaths: [String]) async -> String? {
+        let key = name + "\u{0}" + knownPaths.joined(separator: "\u{0}")
+        if let cached = cache[key] {
+            return cached
+        }
+        let found = await ProcessRunner.uncachedResolve(name, knownPaths: knownPaths)
+        cache[key] = found
+        return found
     }
 }
 

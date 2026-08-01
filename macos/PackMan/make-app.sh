@@ -15,7 +15,7 @@ cp .build/release/PackMan "$APP/Contents/MacOS/PackMan"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
-echo "Ad-hoc code signing..."
-codesign --force --sign - "$APP"
+echo "Ad-hoc code signing (hardened runtime)..."
+codesign --force --options runtime --sign - "$APP"
 
 echo "Done: $APP"

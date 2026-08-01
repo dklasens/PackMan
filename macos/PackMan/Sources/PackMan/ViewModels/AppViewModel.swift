@@ -36,6 +36,7 @@ final class AppViewModel {
     var packages: [PackageUpdate] = []
     var logLines: [String] = []
     var isBusy = false
+    var hasScanned = false
     var statusText = "Ready. Click Scan to check for updates."
     var sortOrder: [KeyPathComparator<PackageUpdate>] = [
         .init(\.source, order: .forward),
@@ -44,6 +45,7 @@ final class AppViewModel {
 
     let sourceOptions: [SourceOption]
 
+    private static let maxLogLines = 1000
     private var lastOutputLine = ""
 
     init() {
@@ -109,6 +111,8 @@ final class AppViewModel {
         }
 
         packages = found
+        applySort()
+        hasScanned = true
         log("Scan complete. \(packages.count) update(s) found.")
         statusText = packages.isEmpty
             ? "System is up to date."
@@ -129,24 +133,7 @@ final class AppViewModel {
         log("Updating \(selected.count) selected package(s).")
 
         for package in selected {
-            package.status = .updating
-            package.statusMessage = nil
-            let name = package.name
-
-            do {
-                try await package.sourceRef.update(packageID: package.packageID, sourceDetail: package.sourceDetail) { line in
-                    Task { @MainActor [weak self] in
-                        self?.logOutput(name: name, line: line)
-                    }
-                }
-                package.status = .succeeded
-                package.currentVersion = package.availableVersion
-                log("[OK] \(name) -> \(package.availableVersion)")
-            } catch {
-                package.status = .failed
-                package.statusMessage = error.userMessage
-                log("[FAIL] \(name): \(error.userMessage)")
-            }
+            await performUpdate(package)
         }
 
         let failed = selected.filter { $0.status == .failed }.count
@@ -155,6 +142,46 @@ final class AppViewModel {
             : "Updates finished with \(failed) failure(s)."
         log("Update run finished.")
         isBusy = false
+    }
+
+    func updateSingle(_ package: PackageUpdate) async {
+        guard !isBusy else { return }
+
+        isBusy = true
+        statusText = "Updating \(package.name)..."
+        log("Updating \(package.name).")
+
+        await performUpdate(package)
+
+        statusText = package.status == .failed
+            ? "Update failed: \(package.name)."
+            : "Updates complete."
+        isBusy = false
+    }
+
+    func applySort() {
+        packages = packages.sorted(using: sortOrder)
+    }
+
+    private func performUpdate(_ package: PackageUpdate) async {
+        package.status = .updating
+        package.statusMessage = nil
+        let name = package.name
+
+        do {
+            try await package.sourceRef.update(packageID: package.packageID, sourceDetail: package.sourceDetail) { line in
+                Task { @MainActor [weak self] in
+                    self?.logOutput(name: name, line: line)
+                }
+            }
+            package.status = .succeeded
+            package.currentVersion = package.availableVersion
+            log("[OK] \(name) -> \(package.availableVersion)")
+        } catch {
+            package.status = .failed
+            package.statusMessage = error.userMessage
+            log("[FAIL] \(name): \(error.userMessage)")
+        }
     }
 
     func selectAll() {
@@ -177,6 +204,9 @@ final class AppViewModel {
     private func log(_ message: String) {
         let timestamp = Date.now.formatted(date: .omitted, time: .standard)
         logLines.append("[\(timestamp)] \(message)")
+        if logLines.count > Self.maxLogLines {
+            logLines.removeFirst(logLines.count - Self.maxLogLines)
+        }
     }
 }
 
