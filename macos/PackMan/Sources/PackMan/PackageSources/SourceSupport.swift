@@ -22,6 +22,11 @@ enum SourceSupport {
                 kind: .configuration,
                 message: "The selected executable is missing or cannot be run: \(path)",
                 recovery: "Choose another executable or switch to automatic discovery."))
+        case let .missingDependency(executablePath, dependency):
+            return .unavailable(SourceIssue(
+                kind: .configuration,
+                message: "\(descriptor.executableName) was found at \(executablePath), but its required \(dependency) runtime was not found.",
+                recovery: "Install or activate \(dependency) for this \(descriptor.executableName) executable, choose \(descriptor.executableName) from a complete installation in Sources, then retry."))
         }
 
         let contextEnvironment = environment(pathEntries: executable.pathEntries)

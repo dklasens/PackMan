@@ -34,6 +34,8 @@ enum ToolResolutionOrigin: String, Sendable {
     case knownPath = "Known location"
     case userPath = "User location"
     case nvm = "nvm"
+    case fnm = "fnm"
+    case volta = "Volta"
 }
 
 struct ResolvedExecutable: Equatable, Sendable {
@@ -46,6 +48,7 @@ enum ToolResolution: Equatable, Sendable {
     case resolved(ResolvedExecutable)
     case notFound
     case invalidOverride(String)
+    case missingDependency(executablePath: String, dependency: String)
 }
 
 struct ToolContext: Equatable, Sendable {
