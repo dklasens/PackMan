@@ -179,30 +179,67 @@ Users can immediately run the same update again, and the footer continues claimi
 - Rescan the affected source after updates to confirm installed state.
 - Support retrying failed packages without rerunning successful ones.
 
-### P2: Package-manager discovery misses common macOS installations
+### P2: npm discovery can find the launcher without finding its Node runtime
 
-**Evidence**
+**Observed failure on the work Mac**
 
-- The fixed search path covers Homebrew and system directories.
-- A GUI-launched app normally receives a minimal inherited `PATH`.
-- Common nvm, asdf, mise, pyenv, and `~/.local/bin` locations are not covered.
-- pip availability checks for `python3`, not whether that interpreter has the pip module.
+```text
+npm: unavailable — npm could not be used: env: node: No such file or directory
+```
+
+This is not an "npm was not found" result. PackMan successfully resolves an executable named `npm` and runs its `--version` probe. The resolved npm launcher then invokes `node` through `/usr/bin/env`, but the child process cannot find `node` on the `PATH` PackMan constructed.
+
+**Why this differs between Macs**
+
+- A Finder-launched macOS app inherits its environment from the GUI session; it does not run the user's interactive shell startup files. A Node directory added by `.zshrc`, nvm, fnm, Volta, asdf, mise, or a corporate shell bootstrap can therefore be present in Terminal but absent in PackMan.
+- `ToolResolver` returns as soon as it finds `npm` on the inherited GUI `PATH`, at a known location such as `/opt/homebrew/bin/npm` or `/usr/local/bin/npm`, or in a user search directory. It does not verify that the matching `node` runtime is usable before accepting that npm candidate.
+- A resolved executable contributes only its own parent directory to `pathEntries`. The probe `PATH` then consists of that npm directory, PackMan's fixed Homebrew/system directories, and the inherited GUI `PATH`. It does not add a separately installed Node runtime directory.
+- nvm-specific npm discovery happens only after inherited-path, known-path, and generic user-location candidates. A visible but unusable npm launcher can therefore shadow a complete npm/Node installation under `~/.nvm`.
+- Choosing an npm executable manually has the same limitation: the override records the npm path and adds only its parent directory. It works when `npm` and `node` are co-located, but not when the selected launcher depends on a Node runtime elsewhere.
 
 Relevant code:
 
-- `macos/PackMan/Sources/PackMan/Services/ProcessRunner.swift:25`
-- `macos/PackMan/Sources/PackMan/PackageSources/PipSource.swift:12`
+- `macos/PackMan/Sources/PackMan/Services/ToolResolver.swift:27`
+- `macos/PackMan/Sources/PackMan/Services/ToolResolver.swift:57`
+- `macos/PackMan/Sources/PackMan/Services/ToolResolver.swift:81`
+- `macos/PackMan/Sources/PackMan/PackageSources/SourceSupport.swift:27`
+- `macos/PackMan/Sources/PackMan/PackageSources/SourceSupport.swift:62`
+- `macos/PackMan/Sources/PackMan/Services/ProcessRunner.swift:66`
+
+The personal Mac likely has `npm` and `node` in the same standard directory, or PackMan was launched from an environment that already included the Node directory. The work Mac likely separates the npm launcher from a shell-initialized or version-managed Node runtime. The error text proves the missing runtime lookup, although the exact installation layout still needs confirmation on that Mac.
+
+Useful confirmation commands on the affected Mac are:
+
+```sh
+command -v npm
+command -v node
+ls -l "$(command -v npm)" "$(command -v node)"
+head -n 1 "$(command -v npm)"
+printf '%s\n' "$PATH"
+```
 
 **Impact**
 
-Installed tools can appear unavailable, while the pip source can appear available and then fail during scanning. With multiple Python installations, the app may also update a different interpreter than the user expects.
+An npm installation that works normally in Terminal can be reported as unavailable by PackMan. Which result the user sees depends on how Node was installed, which npm candidate is found first, and whether the app was opened from Finder or from a shell.
+
+The other two messages in the supplied log have a different signature:
+
+- `mas was not found` means no `mas` executable was resolved. `mas` is an optional dependency used for App Store updates.
+- `pipx was not found` means no `pipx` executable was resolved. It may be genuinely absent or installed in another unsupported user location, but it is not the npm-without-Node failure above.
 
 **Recommended change**
 
-- Probe the actual command needed by each source, such as `python -m pip --version`.
-- Support common user-level tool locations or explicit executable paths in settings.
-- Show the resolved executable or interpreter in the Sources UI.
-- Use the existing `sourceDetail` concept to preserve environment/path context.
+- Treat npm and Node as a runtime pair during discovery. Validate that `node` can be resolved in the environment that will run each npm candidate before accepting it.
+- Prefer a complete version-manager installation over an earlier npm launcher whose Node runtime is unavailable, and preserve both directories in the resolved tool context when they differ.
+- Cover other common Node manager layouts (including fnm and Volta), or obtain a login-shell environment safely and with a timeout.
+- Make the recovery message identify the resolved npm path and state that its Node runtime is missing; "Check the executable" alone does not explain this case.
+
+**Acceptance criteria**
+
+- An npm/Node pair installed in a standard directory remains discoverable.
+- An npm/Node pair installed under nvm remains discoverable even when an earlier standalone npm launcher exists but cannot find Node.
+- If npm and Node are in different directories that are both part of the user's intended toolchain, both directories are included when probing, scanning, updating, and verifying.
+- If npm is found but no compatible Node runtime is available, the Sources UI reports both the selected npm path and the missing Node dependency.
 
 ### P2: Multiple windows can run conflicting operations
 
