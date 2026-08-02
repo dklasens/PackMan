@@ -63,12 +63,12 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testFastSourcePublishesBeforeSlowSourceCompletes() async throws {
+        let slowGate = TestGate()
         let fast = StubSource(
             id: .npm,
             name: "npm",
             probe: { .available(testToolContext) },
             scan: {
-                try await Task.sleep(nanoseconds: 20_000_000)
                 return SourceScanReport(updates: [PackageInfo(id: "fast", name: "fast", currentVersion: "1", availableVersion: "2")])
             })
         let slow = StubSource(
@@ -76,15 +76,21 @@ final class AppViewModelTests: XCTestCase {
             name: "pip",
             probe: { .available(testToolContext) },
             scan: {
-                try await Task.sleep(nanoseconds: 250_000_000)
+                await slowGate.wait()
                 return SourceScanReport()
             })
         let viewModel = AppViewModel(sources: [fast, slow], settings: MemorySettings())
         viewModel.startScan()
-        try await Task.sleep(nanoseconds: 100_000_000)
+
+        let deadline = Date.now.addingTimeInterval(2)
+        while viewModel.packages.first?.packageID != "fast" {
+            if Date.now > deadline { throw WaitError.timedOut }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
 
         XCTAssertTrue(viewModel.isBusy)
         XCTAssertEqual(viewModel.packages.first?.packageID, "fast")
+        await slowGate.open()
         try await waitUntilIdle(viewModel)
     }
 
@@ -209,5 +215,21 @@ private actor SlowVerifier {
         return Dictionary(uniqueKeysWithValues: requests.map {
             ($0.packageID, .satisfied(installedVersion: $0.targetVersion))
         })
+    }
+}
+
+private actor TestGate {
+    private var isOpen = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func open() {
+        isOpen = true
+        continuation?.resume()
+        continuation = nil
     }
 }
