@@ -154,22 +154,32 @@ private final class ProcessExecution: @unchecked Sendable {
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
+        let stdoutReadQueue = DispatchQueue(label: "com.packman.process.stdout.\(UUID().uuidString)")
+        let stderrReadQueue = DispatchQueue(label: "com.packman.process.stderr.\(UUID().uuidString)")
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
         stdoutPipe.fileHandleForReading.readabilityHandler = { [collector] handle in
-            collector.append(handle.availableData, stream: .stdout)
+            stdoutReadQueue.async {
+                collector.append(handle.availableData, stream: .stdout)
+            }
         }
         stderrPipe.fileHandleForReading.readabilityHandler = { [collector] handle in
-            collector.append(handle.availableData, stream: .stderr)
+            stderrReadQueue.async {
+                collector.append(handle.availableData, stream: .stderr)
+            }
         }
 
         process.terminationHandler = { [weak self] terminated in
             guard let self else { return }
             stdoutPipe.fileHandleForReading.readabilityHandler = nil
             stderrPipe.fileHandleForReading.readabilityHandler = nil
-            self.collector.append(stdoutPipe.fileHandleForReading.readDataToEndOfFile(), stream: .stdout)
-            self.collector.append(stderrPipe.fileHandleForReading.readDataToEndOfFile(), stream: .stderr)
+            stdoutReadQueue.sync {
+                self.collector.append(stdoutPipe.fileHandleForReading.readDataToEndOfFile(), stream: .stdout)
+            }
+            stderrReadQueue.sync {
+                self.collector.append(stderrPipe.fileHandleForReading.readDataToEndOfFile(), stream: .stderr)
+            }
             self.complete(exitCode: terminated.terminationStatus)
         }
 
