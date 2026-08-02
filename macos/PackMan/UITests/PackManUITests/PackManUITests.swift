@@ -7,15 +7,15 @@ final class PackManUITests: XCTestCase {
 
     func testInitialStateHasCleanScanActionAndNoTable() {
         let app = launch("initial")
-        XCTAssertTrue(app.staticTexts["Ready to Scan"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["Ready to Scan"].firstMatch.waitForExistence(timeout: 2))
         XCTAssertFalse(element("package-npm-alpha", in: app).exists)
-        XCTAssertTrue(app.buttons["scanCancelButton"].isEnabled)
-        XCTAssertFalse(app.buttons["updateSelectedButton"].isEnabled)
+        XCTAssertTrue(button("scanCancelButton", in: app).isEnabled)
+        XCTAssertFalse(button("updateSelectedButton", in: app).isEnabled)
     }
 
     func testToolbarDoesNotShiftWhenScanStarts() {
         let app = launch("slowScan")
-        let updateButton = app.buttons["updateSelectedButton"]
+        let updateButton = button("updateSelectedButton", in: app)
         XCTAssertTrue(updateButton.waitForExistence(timeout: 2))
         let frameBefore = updateButton.frame
         element("scanCancelButton", in: app).click()
@@ -24,12 +24,12 @@ final class PackManUITests: XCTestCase {
         XCTAssertEqual(frameBefore.midX, frameDuring.midX, accuracy: 1.0)
         XCTAssertEqual(frameBefore.width, frameDuring.width, accuracy: 1.0)
         element("scanCancelButton", in: app).click()
-        XCTAssertTrue(app.staticTexts["Scan Cancelled"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["Scan Cancelled"].firstMatch.waitForExistence(timeout: 3))
     }
 
     func testPartialScanShowsUpdatesAndPersistentWarning() {
         let app = launch("partial")
-        app.buttons["scanCancelButton"].click()
+        button("scanCancelButton", in: app).click()
         XCTAssertTrue(element("package-npm-alpha", in: app).waitForExistence(timeout: 3))
         XCTAssertTrue(element("scanIssueBanner", in: app).exists)
         XCTAssertFalse(app.staticTexts["System is Up to Date"].exists)
@@ -38,32 +38,32 @@ final class PackManUITests: XCTestCase {
 
     func testCheckboxSelectionControlsUpdateAction() {
         let app = launch("updates")
-        app.buttons["scanCancelButton"].click()
+        button("scanCancelButton", in: app).click()
         XCTAssertTrue(element("package-npm-alpha", in: app).waitForExistence(timeout: 3))
-        XCTAssertTrue(app.buttons["Update 2"].isEnabled)
-        app.buttons["selectAllUpdates"].click()
-        XCTAssertFalse(app.buttons["updateSelectedButton"].isEnabled)
-        app.buttons["selectAllUpdates"].click()
-        XCTAssertTrue(app.buttons["Update 2"].isEnabled)
+        XCTAssertTrue(button("Update 2", in: app).isEnabled)
+        button("selectAllUpdates", in: app).click()
+        XCTAssertFalse(button("updateSelectedButton", in: app).isEnabled)
+        button("selectAllUpdates", in: app).click()
+        XCTAssertTrue(button("Update 2", in: app).isEnabled)
     }
 
     func testSuccessfulUpdatesAreRemovedAndSummarized() {
         let app = launch("updates")
-        app.buttons["scanCancelButton"].click()
-        XCTAssertTrue(app.buttons["Update 2"].waitForExistence(timeout: 3))
-        app.buttons["Update 2"].click()
-        XCTAssertTrue(app.staticTexts["Updates Completed"].waitForExistence(timeout: 4))
+        button("scanCancelButton", in: app).click()
+        XCTAssertTrue(button("Update 2", in: app).waitForExistence(timeout: 3))
+        button("Update 2", in: app).click()
+        XCTAssertTrue(app.staticTexts["Updates Completed"].firstMatch.waitForExistence(timeout: 4))
         XCTAssertFalse(element("package-npm-alpha", in: app).exists)
         XCTAssertFalse(element("package-npm-beta", in: app).exists)
-        XCTAssertFalse(app.buttons["updateSelectedButton"].isEnabled)
+        XCTAssertFalse(button("updateSelectedButton", in: app).isEnabled)
     }
 
     func testSourceSheetShowsResolvedExecutableAndHealth() {
         let app = launch("updates")
-        app.buttons["scanCancelButton"].click()
+        button("scanCancelButton", in: app).click()
         XCTAssertTrue(element("package-npm-alpha", in: app).waitForExistence(timeout: 3))
-        app.buttons["sourcesButton"].click()
-        XCTAssertTrue(app.staticTexts["/ui-test/npm"].waitForExistence(timeout: 2))
+        button("sourcesButton", in: app).click()
+        XCTAssertTrue(app.staticTexts["/ui-test/npm"].firstMatch.waitForExistence(timeout: 2))
         XCTAssertTrue(app.staticTexts["npm 12.0.0 • Custom"].exists)
     }
 
@@ -75,6 +75,10 @@ final class PackManUITests: XCTestCase {
     }
 
     private func element(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
-        app.descendants(matching: .any)[identifier]
+        app.descendants(matching: .any)[identifier].firstMatch
+    }
+
+    private func button(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
+        app.buttons[identifier].firstMatch
     }
 }
