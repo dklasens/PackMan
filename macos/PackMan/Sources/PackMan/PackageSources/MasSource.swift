@@ -1,80 +1,99 @@
 import Foundation
 
 struct MasSource: PackageSource {
-    let name = "App Store"
+    let runner: any ProcessRunning
+    let resolver: any ToolResolving
 
-    private static let knownPaths = [
-        "/opt/homebrew/bin/mas",
-        "/usr/local/bin/mas",
-    ]
-
-    // 497799835 Xcode (16.4 -> 16.5)
-    private static let outdatedLine: NSRegularExpression = {
-        try! NSRegularExpression(pattern: "^(\\d+)\\s+(.+?)\\s+\\((.+?)\\s*->\\s*(.+?)\\)\\s*$")
-    }()
-
-    func isAvailable() async -> Bool {
-        await resolveMas() != nil
+    init(
+        runner: any ProcessRunning = ProcessRunner.shared,
+        resolver: any ToolResolving = ToolResolver.shared
+    ) {
+        self.runner = runner
+        self.resolver = resolver
     }
 
-    func scan() async throws -> [PackageInfo] {
-        let mas = try await requireMas()
-        let result = try await ProcessRunner.run(mas, ["outdated"], timeout: 120)
+    let descriptor = SourceDescriptor(
+        id: .appStore,
+        name: "App Store",
+        toolID: .mas,
+        executableName: "mas",
+        knownPaths: ["/opt/homebrew/bin/mas", "/usr/local/bin/mas"],
+        installationURL: URL(string: "https://github.com/mas-cli/mas"))
 
-        guard result.succeeded else {
-            throw SourceError.commandFailed("mas outdated failed (exit \(result.exitCode)): \(result.stderr.trimmed)")
-        }
+    func probe() async -> SourceProbe {
+        await SourceSupport.probe(
+            descriptor: descriptor,
+            versionArguments: ["version"],
+            resolver: resolver,
+            runner: runner)
+    }
 
-        return result.stdout
-            .split(separator: "\n")
-            .compactMap { line -> PackageInfo? in
-                let text = String(line)
-                let range = NSRange(text.startIndex..., in: text)
-                guard let match = Self.outdatedLine.firstMatch(in: text, range: range),
-                      match.numberOfRanges == 5,
-                      let idRange = Range(match.range(at: 1), in: text),
-                      let nameRange = Range(match.range(at: 2), in: text),
-                      let currentRange = Range(match.range(at: 3), in: text),
-                      let availableRange = Range(match.range(at: 4), in: text) else {
-                    return nil
-                }
+    func scan(
+        context: ToolContext,
+        progress: @escaping @Sendable (SourcePhase) async -> Void
+    ) async throws -> SourceScanReport {
+        await progress(.scanning)
+        let result = try await runner.run(
+            context.executablePath,
+            ["outdated"],
+            timeout: 120,
+            environment: SourceSupport.environment(pathEntries: context.pathEntries))
+        guard result.succeeded else { throw SourceSupport.commandFailure("mas outdated", result: result) }
 
-                let id = String(text[idRange])
-                guard PackageIdValidator.isAllDigits(id) else { return nil }
-
-                return PackageInfo(
-                    id: id,
-                    name: String(text[nameRange]),
-                    currentVersion: String(text[currentRange]),
-                    availableVersion: String(text[availableRange]))
+        var updates: [PackageInfo] = []
+        var rejected = 0
+        for line in result.stdout.split(separator: "\n", omittingEmptySubsequences: true) {
+            if let update = MasOutdatedParser.parse(String(line)) {
+                updates.append(update)
+            } else {
+                rejected += 1
             }
+        }
+        let issues = rejected == 0 ? [] : [SourceIssue(
+            kind: .parsing,
+            message: "Could not parse \(rejected) App Store update record(s).",
+            recovery: "Run mas outdated in Terminal and inspect its output.")]
+        return SourceScanReport(updates: updates, issues: issues)
     }
 
-    func update(packageID: String, sourceDetail: String, onOutput: @escaping @Sendable (String) -> Void) async throws {
-        guard PackageIdValidator.isAllDigits(packageID) else {
-            throw SourceError.invalidPackageId(packageID)
+    func update(
+        request: UpdateRequest,
+        context: ToolContext,
+        onOutput: @escaping @Sendable (ProcessOutputEvent) async -> Void
+    ) async throws {
+        guard PackageIdValidator.isAllDigits(request.packageID) else {
+            throw SourceError.invalidPackageId(request.packageID)
         }
-
-        let mas = try await requireMas()
-        let result = try await ProcessRunner.run(
-            mas,
-            ["upgrade", packageID],
+        let result = try await runner.run(
+            context.executablePath,
+            ["upgrade", request.packageID],
             timeout: 900,
+            environment: SourceSupport.environment(pathEntries: context.pathEntries),
             onOutput: onOutput)
-
-        guard result.succeeded else {
-            throw SourceError.commandFailed("mas upgrade failed (exit \(result.exitCode)): \(result.stderr.trimmed)")
-        }
+        guard result.succeeded else { throw SourceSupport.commandFailure("mas upgrade", result: result) }
     }
+}
 
-    private func requireMas() async throws -> String {
-        guard let path = await resolveMas() else {
-            throw SourceError.toolNotFound("mas")
+enum MasOutdatedParser {
+    // 497799835 Xcode (16.4 -> 16.5)
+    private static let pattern = try! NSRegularExpression(pattern: "^(\\d+)\\s+(.+?)\\s+\\((.+?)\\s*->\\s*(.+?)\\)\\s*$")
+
+    static func parse(_ text: String) -> PackageInfo? {
+        let range = NSRange(text.startIndex..., in: text)
+        guard let match = pattern.firstMatch(in: text, range: range),
+              match.numberOfRanges == 5,
+              let idRange = Range(match.range(at: 1), in: text),
+              let nameRange = Range(match.range(at: 2), in: text),
+              let currentRange = Range(match.range(at: 3), in: text),
+              let availableRange = Range(match.range(at: 4), in: text) else {
+            return nil
         }
-        return path
-    }
-
-    private func resolveMas() async -> String? {
-        await ProcessRunner.resolve("mas", knownPaths: Self.knownPaths)
+        let id = String(text[idRange])
+        guard PackageIdValidator.isAllDigits(id) else { return nil }
+        return PackageInfo(
+            id: id,
+            name: String(text[nameRange]),
+            currentVersion: String(text[currentRange]),
+            availableVersion: String(text[availableRange]))
     }
 }

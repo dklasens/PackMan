@@ -1,0 +1,4 @@
+{
+  "typescript": {"current":"5.4.0","wanted":"5.4.0","latest":"6.0.1"},
+  "npm-check-updates": {"current":"17.0.0","wanted":"17.0.0","latest":"18.1.0"}
+}

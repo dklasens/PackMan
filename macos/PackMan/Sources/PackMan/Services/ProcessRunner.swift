@@ -1,6 +1,7 @@
+import Darwin
 import Foundation
 
-struct ProcessResult: Sendable {
+struct ProcessResult: Sendable, Equatable {
     let exitCode: Int32
     let stdout: String
     let stderr: String
@@ -8,194 +9,371 @@ struct ProcessResult: Sendable {
     var succeeded: Bool { exitCode == 0 }
 }
 
-enum ProcessError: LocalizedError {
+enum ProcessOutputStream: String, Sendable {
+    case stdout
+    case stderr
+}
+
+struct ProcessOutputEvent: Sendable, Equatable {
+    let stream: ProcessOutputStream
+    let line: String
+}
+
+enum ProcessError: LocalizedError, Equatable {
     case timedOut(executable: String, timeout: TimeInterval)
+    case cancelled(executable: String)
 
     var errorDescription: String? {
         switch self {
         case let .timedOut(executable, timeout):
-            return "'\(executable)' timed out after \(Int(timeout))s."
+            return "'\(URL(fileURLWithPath: executable).lastPathComponent)' timed out after \(Int(timeout))s."
+        case let .cancelled(executable):
+            return "'\(URL(fileURLWithPath: executable).lastPathComponent)' was cancelled."
         }
     }
 }
 
-enum ProcessRunner {
-    static let defaultTimeout: TimeInterval = 180
-
-    static let searchPATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-
-    static func run(
+protocol ProcessRunning: Sendable {
+    func run(
         _ executable: String,
         _ arguments: [String],
-        timeout: TimeInterval = defaultTimeout,
-        extraEnvironment: [String: String] = [:],
-        onOutput: (@Sendable (String) -> Void)? = nil
+        timeout: TimeInterval,
+        environment: [String: String],
+        onOutput: (@Sendable (ProcessOutputEvent) async -> Void)?
+    ) async throws -> ProcessResult
+}
+
+extension ProcessRunning {
+    func run(
+        _ executable: String,
+        _ arguments: [String],
+        timeout: TimeInterval = ProcessRunner.defaultTimeout,
+        environment: [String: String] = [:],
+        onOutput: (@Sendable (ProcessOutputEvent) async -> Void)? = nil
     ) async throws -> ProcessResult {
-        try await withCheckedThrowingContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: executable)
-            process.arguments = arguments
-
-            var environment = ProcessInfo.processInfo.environment
-            environment["PATH"] = Self.searchPATH + ":" + (environment["PATH"] ?? "/usr/bin:/bin")
-            for (key, value) in extraEnvironment {
-                environment[key] = value
-            }
-            process.environment = environment
-
-            let stdoutPipe = Pipe()
-            let stderrPipe = Pipe()
-            process.standardOutput = stdoutPipe
-            process.standardError = stderrPipe
-
-            let box = OutputBox(onOutput: onOutput)
-
-            stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                if !data.isEmpty { box.append(data, isStdErr: false) }
-            }
-            stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                if !data.isEmpty { box.append(data, isStdErr: true) }
-            }
-
-            let timeoutTask = Task {
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                guard !Task.isCancelled else { return }
-                box.markTimedOut()
-                process.terminate()
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                if process.isRunning {
-                    kill(process.processIdentifier, SIGKILL)
-                }
-            }
-
-            process.terminationHandler = { proc in
-                timeoutTask.cancel()
-                stdoutPipe.fileHandleForReading.readabilityHandler = nil
-                stderrPipe.fileHandleForReading.readabilityHandler = nil
-                box.append(stdoutPipe.fileHandleForReading.readDataToEndOfFile(), isStdErr: false)
-                box.append(stderrPipe.fileHandleForReading.readDataToEndOfFile(), isStdErr: true)
-
-                if box.isTimedOut {
-                    continuation.resume(throwing: ProcessError.timedOut(executable: executable, timeout: timeout))
-                } else {
-                    continuation.resume(returning: box.result(exitCode: proc.terminationStatus))
-                }
-            }
-
-            do {
-                try process.run()
-            } catch {
-                timeoutTask.cancel()
-                stdoutPipe.fileHandleForReading.readabilityHandler = nil
-                stderrPipe.fileHandleForReading.readabilityHandler = nil
-                continuation.resume(throwing: error)
-            }
-        }
-    }
-
-    static func resolve(_ name: String, knownPaths: [String] = []) async -> String? {
-        await ToolPathCache.shared.resolve(name, knownPaths: knownPaths)
-    }
-
-    fileprivate static func uncachedResolve(_ name: String, knownPaths: [String]) async -> String? {
-        for path in knownPaths where FileManager.default.isExecutableFile(atPath: path) {
-            return path
-        }
-
-        guard let result = try? await run("/usr/bin/which", [name], timeout: 10),
-              result.succeeded else {
-            return nil
-        }
-
-        return result.stdout
-            .split(separator: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .first { FileManager.default.isExecutableFile(atPath: $0) }
+        try await run(
+            executable,
+            arguments,
+            timeout: timeout,
+            environment: environment,
+            onOutput: onOutput)
     }
 }
 
-/// Tool locations never change during an app run; avoid re-spawning `which`
-/// for every scan and update. (Newly installed tools are picked up on relaunch.)
-private actor ToolPathCache {
-    static let shared = ToolPathCache()
+struct ProcessRunner: ProcessRunning {
+    static let shared = ProcessRunner()
+    static let defaultTimeout: TimeInterval = 180
+    static let standardSearchPaths = [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ]
 
-    private var cache: [String: String?] = [:]
+    func run(
+        _ executable: String,
+        _ arguments: [String],
+        timeout: TimeInterval,
+        environment: [String: String],
+        onOutput: (@Sendable (ProcessOutputEvent) async -> Void)?
+    ) async throws -> ProcessResult {
+        let execution = ProcessExecution(
+            executable: executable,
+            arguments: arguments,
+            timeout: timeout,
+            environment: environment,
+            onOutput: onOutput)
 
-    func resolve(_ name: String, knownPaths: [String]) async -> String? {
-        let key = name + "\u{0}" + knownPaths.joined(separator: "\u{0}")
-        if let cached = cache[key] {
-            return cached
+        return try await withTaskCancellationHandler {
+            try await execution.start()
+        } onCancel: {
+            execution.cancel()
         }
-        let found = await ProcessRunner.uncachedResolve(name, knownPaths: knownPaths)
-        cache[key] = found
-        return found
     }
 }
 
-private final class OutputBox: @unchecked Sendable {
+private final class ProcessExecution: @unchecked Sendable {
+    private enum StopReason {
+        case cancelled
+        case timedOut
+    }
+
+    private let executable: String
+    private let arguments: [String]
+    private let timeout: TimeInterval
+    private let environment: [String: String]
+    private let collector: ProcessOutputCollector
     private let lock = NSLock()
-    private var stdoutData = Data()
-    private var stderrData = Data()
-    private var pendingLine = Data()
-    private var timedOut = false
-    private let onOutput: (@Sendable (String) -> Void)?
 
-    init(onOutput: (@Sendable (String) -> Void)?) {
-        self.onOutput = onOutput
+    private var process: Process?
+    private var ownsProcessGroup = false
+    private var stopReason: StopReason?
+    private var timeoutTask: Task<Void, Never>?
+    private var continuation: CheckedContinuation<ProcessResult, Error>?
+    private var didResume = false
+
+    init(
+        executable: String,
+        arguments: [String],
+        timeout: TimeInterval,
+        environment: [String: String],
+        onOutput: (@Sendable (ProcessOutputEvent) async -> Void)?
+    ) {
+        self.executable = executable
+        self.arguments = arguments
+        self.timeout = timeout
+        self.environment = environment
+        collector = ProcessOutputCollector(onOutput: onOutput)
     }
 
-    func append(_ data: Data, isStdErr: Bool) {
-        guard !data.isEmpty else { return }
+    func start() async throws -> ProcessResult {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.lock()
+            self.continuation = continuation
+            lock.unlock()
+            launch()
+        }
+    }
+
+    func cancel() {
+        requestStop(.cancelled)
+    }
+
+    private func launch() {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+
+        var mergedEnvironment = ProcessInfo.processInfo.environment
+        let inheritedPATH = mergedEnvironment["PATH"] ?? "/usr/bin:/bin"
+        mergedEnvironment["PATH"] = ProcessRunner.standardSearchPaths.joined(separator: ":") + ":" + inheritedPATH
+        for (key, value) in environment { mergedEnvironment[key] = value }
+        process.environment = mergedEnvironment
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        stdoutPipe.fileHandleForReading.readabilityHandler = { [collector] handle in
+            collector.append(handle.availableData, stream: .stdout)
+        }
+        stderrPipe.fileHandleForReading.readabilityHandler = { [collector] handle in
+            collector.append(handle.availableData, stream: .stderr)
+        }
+
+        process.terminationHandler = { [weak self] terminated in
+            guard let self else { return }
+            stdoutPipe.fileHandleForReading.readabilityHandler = nil
+            stderrPipe.fileHandleForReading.readabilityHandler = nil
+            self.collector.append(stdoutPipe.fileHandleForReading.readDataToEndOfFile(), stream: .stdout)
+            self.collector.append(stderrPipe.fileHandleForReading.readDataToEndOfFile(), stream: .stderr)
+            self.complete(exitCode: terminated.terminationStatus)
+        }
+
         lock.lock()
-        if isStdErr {
-            stderrData.append(data)
+        self.process = process
+        let shouldStop = stopReason != nil
+        lock.unlock()
+
+        do {
+            try process.run()
+            let pid = process.processIdentifier
+            let groupWasCreated = setpgid(pid, pid) == 0 || getpgid(pid) == pid
+            lock.lock()
+            ownsProcessGroup = groupWasCreated
+            lock.unlock()
+
+            scheduleTimeout()
+            if shouldStop { terminateProcess() }
+        } catch {
+            stdoutPipe.fileHandleForReading.readabilityHandler = nil
+            stderrPipe.fileHandleForReading.readabilityHandler = nil
+            Task { [collector] in
+                _ = await collector.finish()
+                self.resume(throwing: error)
+            }
+        }
+    }
+
+    private func scheduleTimeout() {
+        timeoutTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            } catch {
+                return
+            }
+            requestStop(.timedOut)
+        }
+    }
+
+    private func requestStop(_ reason: StopReason) {
+        lock.lock()
+        if stopReason == nil { stopReason = reason }
+        let process = process
+        lock.unlock()
+
+        guard process != nil else { return }
+        terminateProcess()
+    }
+
+    private func terminateProcess() {
+        lock.lock()
+        guard let process else {
             lock.unlock()
             return
         }
-        stdoutData.append(data)
-        pendingLine.append(data)
-        var lines: [String] = []
-        while let newlineIndex = pendingLine.firstIndex(of: 0x0A) {
-            let lineData = pendingLine.subdata(in: pendingLine.startIndex..<newlineIndex)
-            pendingLine.removeSubrange(pendingLine.startIndex...newlineIndex)
-            if let line = String(data: lineData, encoding: .utf8) {
-                lines.append(line)
+        let pid = process.processIdentifier
+        let processGroup = ownsProcessGroup
+        lock.unlock()
+
+        if processGroup { _ = Darwin.kill(-pid, SIGTERM) }
+        if process.isRunning { process.terminate() }
+
+        Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+            } catch {
+                return
+            }
+            guard let self else { return }
+            self.forceKillIfRunning()
+        }
+    }
+
+    private func forceKillIfRunning() {
+        lock.lock()
+        guard let process, process.isRunning else {
+            lock.unlock()
+            return
+        }
+        let pid = process.processIdentifier
+        let processGroup = ownsProcessGroup
+        lock.unlock()
+
+        if processGroup { _ = Darwin.kill(-pid, SIGKILL) }
+        _ = Darwin.kill(pid, SIGKILL)
+    }
+
+    private func complete(exitCode: Int32) {
+        timeoutTask?.cancel()
+        Task { [collector] in
+            let output = await collector.finish()
+            let reason = self.currentStopReason()
+
+            switch reason {
+            case .cancelled:
+                self.resume(throwing: ProcessError.cancelled(executable: self.executable))
+            case .timedOut:
+                self.resume(throwing: ProcessError.timedOut(executable: self.executable, timeout: self.timeout))
+            case nil:
+                self.resume(returning: ProcessResult(exitCode: exitCode, stdout: output.stdout, stderr: output.stderr))
             }
         }
-        let callback = onOutput
-        lock.unlock()
-
-        if let callback {
-            for line in lines { callback(line) }
-        }
     }
 
-    func markTimedOut() {
-        lock.lock()
-        timedOut = true
-        lock.unlock()
+    private func resume(returning result: ProcessResult) {
+        takeContinuation()?.resume(returning: result)
     }
 
-    var isTimedOut: Bool {
+    private func resume(throwing error: Error) {
+        takeContinuation()?.resume(throwing: error)
+    }
+
+    private func takeContinuation() -> CheckedContinuation<ProcessResult, Error>? {
         lock.lock()
         defer { lock.unlock() }
-        return timedOut
+        guard !didResume else { return nil }
+        didResume = true
+        let continuation = continuation
+        self.continuation = nil
+        return continuation
     }
 
-    func result(exitCode: Int32) -> ProcessResult {
+    private func currentStopReason() -> StopReason? {
         lock.lock()
-        let out = String(data: stdoutData, encoding: .utf8) ?? ""
-        let err = String(data: stderrData, encoding: .utf8) ?? ""
-        let remainder = pendingLine
-        let callback = onOutput
-        lock.unlock()
+        defer { lock.unlock() }
+        return stopReason
+    }
+}
 
-        if let callback, !remainder.isEmpty, let line = String(data: remainder, encoding: .utf8) {
-            callback(line)
+private final class ProcessOutputCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stdoutData = Data()
+    private var stderrData = Data()
+    private var stdoutRemainder = Data()
+    private var stderrRemainder = Data()
+    private let continuation: AsyncStream<ProcessOutputEvent>.Continuation
+    private let deliveryTask: Task<Void, Never>
+    private var didFinish = false
+
+    init(onOutput: (@Sendable (ProcessOutputEvent) async -> Void)?) {
+        var streamContinuation: AsyncStream<ProcessOutputEvent>.Continuation!
+        let stream = AsyncStream<ProcessOutputEvent> { streamContinuation = $0 }
+        continuation = streamContinuation
+        deliveryTask = Task {
+            for await event in stream {
+                await onOutput?(event)
+            }
+        }
+    }
+
+    func append(_ data: Data, stream: ProcessOutputStream) {
+        guard !data.isEmpty else { return }
+        lock.lock()
+        guard !didFinish else {
+            lock.unlock()
+            return
         }
 
-        return ProcessResult(exitCode: exitCode, stdout: out, stderr: err)
+        switch stream {
+        case .stdout:
+            stdoutData.append(data)
+            stdoutRemainder.append(data)
+            emitCompleteLines(from: &stdoutRemainder, stream: .stdout)
+        case .stderr:
+            stderrData.append(data)
+            stderrRemainder.append(data)
+            emitCompleteLines(from: &stderrRemainder, stream: .stderr)
+        }
+        lock.unlock()
+    }
+
+    func finish() async -> (stdout: String, stderr: String) {
+        let output = finishSnapshot()
+        await deliveryTask.value
+        return output
+    }
+
+    private func finishSnapshot() -> (stdout: String, stderr: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        if !didFinish {
+            emitRemainder(stdoutRemainder, stream: .stdout)
+            emitRemainder(stderrRemainder, stream: .stderr)
+            didFinish = true
+            continuation.finish()
+        }
+        let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+        let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+        return (stdout, stderr)
+    }
+
+    private func emitCompleteLines(from remainder: inout Data, stream: ProcessOutputStream) {
+        while let newline = remainder.firstIndex(of: 0x0A) {
+            let lineData = remainder.subdata(in: remainder.startIndex..<newline)
+            remainder.removeSubrange(remainder.startIndex...newline)
+            if let line = String(data: lineData, encoding: .utf8) {
+                continuation.yield(ProcessOutputEvent(stream: stream, line: line))
+            }
+        }
+    }
+
+    private func emitRemainder(_ remainder: Data, stream: ProcessOutputStream) {
+        guard !remainder.isEmpty, let line = String(data: remainder, encoding: .utf8) else { return }
+        continuation.yield(ProcessOutputEvent(stream: stream, line: line))
     }
 }

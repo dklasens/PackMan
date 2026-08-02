@@ -1,0 +1,88 @@
+name: PackMan
+options:
+  bundleIdPrefix: com.packman
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+settings:
+  base:
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "2"
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ""
+targets:
+  PackMan:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/PackMan
+      - path: Resources/AppIcon.icns
+        buildPhase: resources
+    info:
+      path: Resources/Info.plist
+      properties:
+        CFBundleDisplayName: PackMan
+        CFBundleIconFile: AppIcon
+        CFBundleIconName: AppIcon
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        LSApplicationCategoryType: public.app-category.utilities
+        LSMinimumSystemVersion: "$(MACOSX_DEPLOYMENT_TARGET)"
+        NSHighResolutionCapable: true
+        NSPrincipalClass: NSApplication
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.packman.PackMan
+        PRODUCT_NAME: PackMan
+        INFOPLIST_FILE: Resources/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        ENABLE_HARDENED_RUNTIME: YES
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
+  PackManTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/PackManTests
+        excludes:
+          - Fixtures
+      - path: Tests/PackManTests/Fixtures
+        buildPhase: resources
+    dependencies:
+      - target: PackMan
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.packman.PackManTests
+        GENERATE_INFOPLIST_FILE: YES
+  PackManUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - path: UITests/PackManUITests
+    dependencies:
+      - target: PackMan
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.packman.PackManUITests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  PackMan:
+    build:
+      targets:
+        PackMan: all
+        PackManTests: [test]
+        PackManUITests: [test]
+    test:
+      gatherCoverageData: false
+      targets:
+        - name: PackManTests
+          parallelizable: true
+        - name: PackManUITests
+          parallelizable: false
+    run:
+      config: Debug
+    archive:
+      config: Release

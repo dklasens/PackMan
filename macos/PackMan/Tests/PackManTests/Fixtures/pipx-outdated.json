@@ -1,0 +1,16 @@
+{
+  "pipx_result_version":"1",
+  "command":["list"],
+  "status":"partial",
+  "exit_code":1,
+  "data":{
+    "packages_checked":2,
+    "packages":[
+      {"environment":"ruff","package":"ruff","version":"0.9.0","latest_version":"0.11.0","injected":false,"pinned":false}
+    ],
+    "skipped":[]
+  },
+  "errors":[
+    {"code":"environment_outdated_check_failed","message":"index unavailable","environment":"black"}
+  ]
+}

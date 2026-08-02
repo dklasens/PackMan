@@ -5,52 +5,63 @@ import SwiftUI
 @MainActor
 final class SourceOption: Identifiable {
     let source: any PackageSource
-    var isEnabled: Bool {
-        didSet { Settings.shared.setSource(source.name, enabled: isEnabled) }
-    }
+    var isEnabled: Bool
+    var scanState: SourceScanState
+    var toolContext: ToolContext?
+    var probeIssue: SourceIssue?
 
-    nonisolated var id: String { source.name }
+    nonisolated var id: SourceID { source.id }
     var name: String { source.name }
+    var descriptor: SourceDescriptor { source.descriptor }
 
-    init(source: any PackageSource) {
+    init(source: any PackageSource, isEnabled: Bool) {
         self.source = source
-        self.isEnabled = !Settings.shared.isDisabled(source.name)
+        self.isEnabled = isEnabled
+        scanState = isEnabled ? .notScanned : .disabled
     }
 }
 
-private struct ScanOutcome: Sendable {
-    enum State: Sendable {
-        case unavailable
-        case success([PackageInfo])
-        case failed(String)
+private struct SourceOutcome: Sendable {
+    enum Result: Sendable {
+        case unavailable(SourceIssue)
+        case report(SourceScanReport, ToolContext)
+        case failed(SourceIssue)
+        case cancelled
     }
 
-    let index: Int
-    let name: String
-    let state: State
+    let source: any PackageSource
+    let result: Result
 }
 
 @Observable
 @MainActor
 final class AppViewModel {
     var packages: [PackageUpdate] = []
-    var logLines: [String] = []
-    var isBusy = false
-    var hasScanned = false
-    var statusText = "Ready. Click Scan to check for updates."
-    var sortOrder: [KeyPathComparator<PackageUpdate>] = [
-        .init(\.source, order: .forward),
-        .init(\.name, order: .forward),
+    var logEntries: [LogEntry] = []
+    var operation: AppOperation = .idle
+    var scanSummary: ScanSummary = .notStarted
+    var updateSummary: UpdateRunSummary?
+    var sortOrder: [PackageSortComparator] = [
+        PackageSortComparator(field: .source),
+        PackageSortComparator(field: .name),
     ]
+    var isLogVisible = false
 
     let sourceOptions: [SourceOption]
 
-    private static let maxLogLines = 1000
-    private var lastOutputLine = ""
+    @ObservationIgnored private let settings: any SettingsStoring
+    @ObservationIgnored private var activeTask: Task<Void, Never>?
+    @ObservationIgnored private var nextLogID = 0
+    @ObservationIgnored private var lastOutputByCommandAndStream: [String: String] = [:]
 
-    init() {
-        Settings.shared.load()
-        let sources: [any PackageSource] = [
+    private static let maxLogLines = 1000
+
+    init(
+        sources: [any PackageSource]? = nil,
+        settings: any SettingsStoring = SettingsStore.shared
+    ) {
+        self.settings = settings
+        let configuredSources = sources ?? [
             BrewSource(kind: .formula),
             BrewSource(kind: .cask),
             MasSource(),
@@ -58,155 +69,505 @@ final class AppViewModel {
             PipSource(),
             PipxSource(),
         ]
-        sourceOptions = sources.map { SourceOption(source: $0) }
+        sourceOptions = configuredSources.map {
+            SourceOption(source: $0, isEnabled: settings.isSourceEnabled($0.id))
+        }
+        if let issue = settings.loadIssue {
+            appendLog(issue, level: .warning)
+        }
     }
 
-    func scan() async {
-        guard !isBusy else { return }
-        let sources = sourceOptions.filter(\.isEnabled).map(\.source)
-        guard !sources.isEmpty else {
-            statusText = "No sources selected."
+    var isBusy: Bool { operation.isBusy }
+    var enabledSourceCount: Int { sourceOptions.filter(\.isEnabled).count }
+    var actionablePackages: [PackageUpdate] { packages.filter(\.isActionable) }
+    var selectedPackages: [PackageUpdate] { actionablePackages.filter(\.isSelected) }
+    var selectedCount: Int { selectedPackages.count }
+    var updateCount: Int { actionablePackages.count }
+    var canUpdate: Bool { !isBusy && selectedCount > 0 }
+    var issueSources: [SourceOption] { sourceOptions.filter { $0.isEnabled && $0.scanState.hasIssue } }
+
+    var statusText: String {
+        switch operation {
+        case .scanning(let completed, let total):
+            return "Scanning sources (\(completed) of \(total))…"
+        case .updating(let current, let completed, let total):
+            if let current { return "Updating \(current) (\(completed + 1) of \(total))…" }
+            return "Preparing updates…"
+        case .cancelling:
+            return "Cancelling…"
+        case .idle:
+            break
+        }
+
+        if let updateSummary, updateSummary.total > 0 {
+            var parts: [String] = []
+            if updateSummary.updated > 0 { parts.append(Self.count(updateSummary.updated, singular: "updated package", plural: "updated packages")) }
+            if updateSummary.failed > 0 { parts.append(Self.count(updateSummary.failed, singular: "failure", plural: "failures")) }
+            if updateSummary.verificationFailed > 0 { parts.append(Self.count(updateSummary.verificationFailed, singular: "verification issue", plural: "verification issues")) }
+            if updateSummary.cancelled > 0 { parts.append(Self.count(updateSummary.cancelled, singular: "cancelled update", plural: "cancelled updates")) }
+            return parts.joined(separator: ", ").capitalized + "."
+        }
+
+        switch scanSummary {
+        case .notStarted: return "Ready to scan."
+        case .running: return "Scanning…"
+        case .updatesAvailable(let count): return Self.count(count, singular: "update available", plural: "updates available").capitalized + "."
+        case .updatesCompleted: return "Selected updates completed."
+        case .upToDate: return "System is up to date."
+        case .completedWithIssues(let updates, let issues, _):
+            return "Scan completed with \(Self.count(issues, singular: "issue", plural: "issues")) and \(Self.count(updates, singular: "update", plural: "updates"))."
+        case .allUnavailable: return "No enabled sources could be scanned."
+        case .noSources: return "No sources selected."
+        case .cancelled: return "Scan cancelled; displayed results may be partial."
+        }
+    }
+
+    var footerText: String {
+        guard updateCount > 0 else { return "No actionable updates" }
+        return "\(selectedCount) selected of \(updateCount)"
+    }
+
+    func startScan() {
+        guard activeTask == nil else { return }
+        let enabled = sourceOptions.filter(\.isEnabled).map(\.id)
+        guard !enabled.isEmpty else {
+            scanSummary = .noSources
             return
         }
-
-        isBusy = true
-        statusText = "Scanning..."
-        packages = []
-        log("Scan started (\(sources.map(\.name).joined(separator: ", "))).")
-
-        let outcomes = await withTaskGroup(of: ScanOutcome.self) { group in
-            for (index, source) in sources.enumerated() {
-                group.addTask {
-                    guard await source.isAvailable() else {
-                        return ScanOutcome(index: index, name: source.name, state: .unavailable)
-                    }
-                    do {
-                        let found = try await source.scan()
-                        return ScanOutcome(index: index, name: source.name, state: .success(found))
-                    } catch {
-                        return ScanOutcome(index: index, name: source.name, state: .failed(error.userMessage))
-                    }
-                }
-            }
-
-            var collected: [ScanOutcome] = []
-            for await outcome in group {
-                collected.append(outcome)
-            }
-            return collected.sorted { $0.index < $1.index }
+        activeTask = Task { [weak self] in
+            await self?.runScan(sourceIDs: Set(enabled), fresh: true)
         }
-
-        var found: [PackageUpdate] = []
-        for outcome in outcomes {
-            switch outcome.state {
-            case .unavailable:
-                log("\(outcome.name): not found, skipped.")
-            case .failed(let message):
-                log("\(outcome.name): scan failed - \(message)")
-            case .success(let infos):
-                log("\(outcome.name): \(infos.count) update(s).")
-                let source = sources[outcome.index]
-                found.append(contentsOf: infos.map { PackageUpdate(info: $0, source: source) })
-            }
-        }
-
-        packages = found
-        applySort()
-        hasScanned = true
-        log("Scan complete. \(packages.count) update(s) found.")
-        statusText = packages.isEmpty
-            ? "System is up to date."
-            : "\(packages.count) update(s) available."
-        isBusy = false
     }
 
-    func updateSelected() async {
-        guard !isBusy else { return }
-        let selected = packages.filter(\.isSelected)
-        guard !selected.isEmpty else {
-            statusText = "Nothing selected."
-            return
+    func retryIssues() {
+        guard activeTask == nil else { return }
+        let ids = Set(issueSources.map(\.id))
+        guard !ids.isEmpty else { return }
+        activeTask = Task { [weak self] in
+            await self?.runScan(sourceIDs: ids, fresh: false)
         }
-
-        isBusy = true
-        statusText = "Updating \(selected.count) package(s)..."
-        log("Updating \(selected.count) selected package(s).")
-
-        for package in selected {
-            await performUpdate(package)
-        }
-
-        let failed = selected.filter { $0.status == .failed }.count
-        statusText = failed == 0
-            ? "Updates complete."
-            : "Updates finished with \(failed) failure(s)."
-        log("Update run finished.")
-        isBusy = false
     }
 
-    func updateSingle(_ package: PackageUpdate) async {
+    func cancelOperation() {
+        guard let activeTask else { return }
+        operation = .cancelling
+        activeTask.cancel()
+    }
+
+    func startUpdateSelected() {
+        startUpdate(packages: selectedPackages)
+    }
+
+    func startUpdateSingle(_ package: PackageUpdate) {
+        guard package.isActionable else { return }
+        startUpdate(packages: [package])
+    }
+
+    func setSourceEnabled(_ option: SourceOption, enabled: Bool) {
         guard !isBusy else { return }
+        do {
+            try settings.setSource(option.id, enabled: enabled)
+            option.isEnabled = enabled
+            option.scanState = enabled ? .notScanned : .disabled
+            option.toolContext = nil
+            option.probeIssue = nil
+            packages.removeAll { $0.sourceID == option.id }
+            scanSummary = .notStarted
+            updateSummary = nil
+            applySort()
+        } catch {
+            appendLog("Could not save source settings: \(error.userMessage)", level: .error)
+            isLogVisible = true
+        }
+    }
 
-        isBusy = true
-        statusText = "Updating \(package.name)..."
-        log("Updating \(package.name).")
+    func setExecutableOverride(_ path: String?, for toolID: ToolID) {
+        guard !isBusy else { return }
+        do {
+            try settings.setExecutableOverride(path, for: toolID)
+            for option in sourceOptions where option.descriptor.toolID == toolID {
+                option.toolContext = nil
+                option.probeIssue = nil
+                option.scanState = option.isEnabled ? .notScanned : .disabled
+                packages.removeAll { $0.sourceID == option.id }
+            }
+            scanSummary = .notStarted
+            updateSummary = nil
+            appendLog(path == nil ? "Using automatic discovery for \(toolID.rawValue)." : "Executable override saved for \(toolID.rawValue).")
+        } catch {
+            appendLog("Could not save executable setting: \(error.userMessage)", level: .error)
+            isLogVisible = true
+        }
+    }
 
-        await performUpdate(package)
+    func executableOverride(for toolID: ToolID) -> String? {
+        settings.executableOverride(for: toolID)
+    }
 
-        statusText = package.status == .failed
-            ? "Update failed: \(package.name)."
-            : "Updates complete."
-        isBusy = false
+    func selectAll() {
+        guard !isBusy else { return }
+        for package in actionablePackages { package.isSelected = true }
+    }
+
+    func selectNone() {
+        guard !isBusy else { return }
+        for package in actionablePackages { package.isSelected = false }
+    }
+
+    func clearLog() {
+        logEntries.removeAll()
+        lastOutputByCommandAndStream.removeAll()
     }
 
     func applySort() {
         packages = packages.sorted(using: sortOrder)
     }
 
-    private func performUpdate(_ package: PackageUpdate) async {
-        package.status = .updating
-        package.statusMessage = nil
-        let name = package.name
+    private func runScan(sourceIDs: Set<SourceID>, fresh: Bool) async {
+        let options = sourceOptions.filter { sourceIDs.contains($0.id) && $0.isEnabled }
+        guard !options.isEmpty else {
+            activeTask = nil
+            return
+        }
 
-        do {
-            try await package.sourceRef.update(packageID: package.packageID, sourceDetail: package.sourceDetail) { line in
-                Task { @MainActor [weak self] in
-                    self?.logOutput(name: name, line: line)
+        updateSummary = nil
+        if fresh {
+            packages.removeAll()
+            for option in sourceOptions {
+                option.scanState = option.isEnabled ? .waiting : .disabled
+                option.toolContext = nil
+                option.probeIssue = nil
+            }
+            appendLog("Scan started (\(options.map(\.name).joined(separator: ", "))).")
+        } else {
+            for option in options { option.scanState = .waiting }
+            appendLog("Retrying sources with issues (\(options.map(\.name).joined(separator: ", "))).")
+        }
+
+        scanSummary = .running
+        operation = .scanning(completed: 0, total: options.count)
+        var completed = 0
+        var wasCancelled = false
+
+        await withTaskGroup(of: SourceOutcome.self) { group in
+            for option in options {
+                let source = option.source
+                group.addTask { [weak self] in
+                    await self?.setSourceProbing(source.id)
+                    if Task.isCancelled {
+                        return SourceOutcome(source: source, result: .cancelled)
+                    }
+                    let probe = await source.probe()
+                    if Task.isCancelled {
+                        return SourceOutcome(source: source, result: .cancelled)
+                    }
+                    switch probe {
+                    case .unavailable(let issue):
+                        return SourceOutcome(source: source, result: .unavailable(issue))
+                    case .available(let context):
+                        await self?.setSourceContext(context, for: source.id)
+                        do {
+                            let report = try await source.scan(context: context) { [weak self] phase in
+                                await self?.setSourcePhase(phase, for: source.id)
+                            }
+                            try Task.checkCancellation()
+                            return SourceOutcome(source: source, result: .report(report, context))
+                        } catch is CancellationError {
+                            return SourceOutcome(source: source, result: .cancelled)
+                        } catch let error as ProcessError where error.isCancellation {
+                            return SourceOutcome(source: source, result: .cancelled)
+                        } catch {
+                            return SourceOutcome(source: source, result: .failed(SourceIssue(
+                                kind: .command,
+                                message: error.userMessage,
+                                recovery: "Open the log for details and retry.")))
+                        }
+                    }
                 }
             }
-            package.status = .succeeded
-            package.currentVersion = package.availableVersion
-            log("[OK] \(name) -> \(package.availableVersion)")
-        } catch {
-            package.status = .failed
-            package.statusMessage = error.userMessage
-            log("[FAIL] \(name): \(error.userMessage)")
+
+            for await outcome in group {
+                completed += 1
+                apply(outcome)
+                if case .cancelled = outcome.result { wasCancelled = true }
+                if operation != .cancelling {
+                    operation = .scanning(completed: completed, total: options.count)
+                }
+            }
+        }
+
+        let completedAt = Date.now
+        if wasCancelled || Task.isCancelled {
+            scanSummary = .cancelled(completedAt)
+            appendLog("Scan cancelled. Completed source results were preserved.", level: .warning)
+        } else {
+            deriveScanSummary(completedAt: completedAt)
+            appendLog("Scan complete. \(Self.count(updateCount, singular: "update", plural: "updates")) found.")
+        }
+        applySort()
+        operation = .idle
+        activeTask = nil
+    }
+
+    private func apply(_ outcome: SourceOutcome) {
+        guard let option = sourceOptions.first(where: { $0.id == outcome.source.id }) else { return }
+        let now = Date.now
+        switch outcome.result {
+        case .unavailable(let issue):
+            option.probeIssue = issue
+            option.scanState = .unavailable(issue, completedAt: now)
+            appendLog("\(option.name): unavailable — \(issue.message)", level: .warning)
+        case .report(let report, let context):
+            option.toolContext = context
+            option.probeIssue = nil
+            replacePackages(for: outcome.source, context: context, with: report.updates)
+            if report.issues.isEmpty {
+                option.scanState = .succeeded(updateCount: report.updates.count, completedAt: now)
+                appendLog("\(option.name): \(Self.count(report.updates.count, singular: "update", plural: "updates")).")
+            } else {
+                option.scanState = .partial(updateCount: report.updates.count, issues: report.issues, completedAt: now)
+                appendLog("\(option.name): partial result — \(report.issues.map(\.message).joined(separator: "; "))", level: .warning)
+                isLogVisible = true
+            }
+        case .failed(let issue):
+            option.scanState = .failed(issue, completedAt: now)
+            appendLog("\(option.name): scan failed — \(issue.message)", level: .error)
+            isLogVisible = true
+        case .cancelled:
+            option.scanState = .cancelled(completedAt: now)
+            appendLog("\(option.name): cancelled.", level: .warning)
         }
     }
 
-    func selectAll() {
-        guard !isBusy else { return }
-        for package in packages { package.isSelected = true }
+    private func replacePackages(
+        for source: any PackageSource,
+        context: ToolContext,
+        with infos: [PackageInfo]
+    ) {
+        packages.removeAll { $0.sourceID == source.id }
+        packages.append(contentsOf: infos.map { PackageUpdate(info: $0, source: source, context: context) })
+        applySort()
     }
 
-    func selectNone() {
-        guard !isBusy else { return }
-        for package in packages { package.isSelected = false }
-    }
-
-    private func logOutput(name: String, line: String) {
-        let trimmed = line.trimmed
-        guard !trimmed.isEmpty, trimmed != lastOutputLine else { return }
-        lastOutputLine = trimmed
-        log("  \(name): \(trimmed)")
-    }
-
-    private func log(_ message: String) {
-        let timestamp = Date.now.formatted(date: .omitted, time: .standard)
-        logLines.append("[\(timestamp)] \(message)")
-        if logLines.count > Self.maxLogLines {
-            logLines.removeFirst(logLines.count - Self.maxLogLines)
+    private func deriveScanSummary(completedAt: Date) {
+        let enabled = sourceOptions.filter(\.isEnabled)
+        guard !enabled.isEmpty else {
+            scanSummary = .noSources
+            return
         }
+        if enabled.allSatisfy({ $0.scanState.isUnavailable }) {
+            scanSummary = .allUnavailable(completedAt)
+            return
+        }
+        let issueCount = enabled.reduce(0) { count, option in
+            count + option.scanState.issues.count + (option.scanState.hasIssue && option.scanState.issues.isEmpty ? 1 : 0)
+        }
+        if issueCount > 0 {
+            scanSummary = .completedWithIssues(updateCount: updateCount, issueCount: issueCount, completedAt: completedAt)
+        } else if updateCount == 0 {
+            scanSummary = .upToDate(completedAt)
+        } else {
+            scanSummary = .updatesAvailable(updateCount)
+        }
+    }
+
+    private func startUpdate(packages selected: [PackageUpdate]) {
+        guard activeTask == nil, !selected.isEmpty else { return }
+        activeTask = Task { [weak self] in
+            await self?.runUpdates(selected)
+        }
+    }
+
+    private func runUpdates(_ selected: [PackageUpdate]) async {
+        updateSummary = nil
+        isLogVisible = true
+        appendLog("Updating \(Self.count(selected.count, singular: "selected package", plural: "selected packages")).")
+        operation = .updating(current: nil, completed: 0, total: selected.count)
+
+        var summary = UpdateRunSummary()
+        var completed = 0
+        var cancelled = false
+        let sourceOrder = sourceOptions.map(\.id)
+
+        for sourceID in sourceOrder {
+            let sourcePackages = selected.filter { $0.sourceID == sourceID }
+            guard !sourcePackages.isEmpty else { continue }
+            guard let source = sourcePackages.first?.sourceRef,
+                  let context = sourcePackages.first?.toolContext else { continue }
+
+            var verificationPackages: [PackageUpdate] = []
+            for package in sourcePackages {
+                if Task.isCancelled {
+                    cancelled = true
+                    break
+                }
+                operation = .updating(current: package.name, completed: completed, total: selected.count)
+
+                if package.status.needsVerificationOnly {
+                    package.status = .verifying
+                    verificationPackages.append(package)
+                    continue
+                }
+
+                package.status = .updating
+                let commandID = package.id
+                let packageName = package.name
+                lastOutputByCommandAndStream = lastOutputByCommandAndStream.filter { !$0.key.hasPrefix(commandID + "|") }
+                do {
+                    try await source.update(
+                        request: package.updateRequest,
+                        context: context
+                    ) { [weak self] event in
+                        await self?.appendOutput(commandID: commandID, scope: packageName, event: event)
+                    }
+                    package.status = .verifying
+                    verificationPackages.append(package)
+                } catch is CancellationError {
+                    package.status = .cancelled
+                    package.isSelected = true
+                    summary.cancelled += 1
+                    cancelled = true
+                    break
+                } catch let error as ProcessError where error.isCancellation {
+                    package.status = .cancelled
+                    package.isSelected = true
+                    summary.cancelled += 1
+                    cancelled = true
+                    break
+                } catch {
+                    package.status = .failed(.update, error.userMessage)
+                    package.isSelected = true
+                    summary.failed += 1
+                    completed += 1
+                    appendLog("\(package.name): update failed — \(error.userMessage)", level: .error)
+                }
+                applySort()
+            }
+
+            if !verificationPackages.isEmpty {
+                let requests = verificationPackages.map(\.updateRequest)
+                do {
+                    let results = try await source.verify(requests: requests, context: context)
+                    var removeIDs = Set<String>()
+                    for package in verificationPackages {
+                        switch results[package.packageID] {
+                        case .satisfied(let installedVersion):
+                            if let installedVersion { package.currentVersion = installedVersion }
+                            package.isSelected = false
+                            removeIDs.insert(package.id)
+                            summary.updated += 1
+                            appendLog("\(package.name) updated to \(package.currentVersion).", level: .success)
+                        case .stillOutdated(let info):
+                            package.currentVersion = info.currentVersion
+                            package.availableVersion = info.availableVersion
+                            package.status = .failed(.update, "The package is still outdated after the update command completed.")
+                            package.isSelected = true
+                            summary.failed += 1
+                            appendLog("\(package.name) is still outdated after updating.", level: .error)
+                        case nil:
+                            package.status = .failed(.verification, "The source did not return a verification result.")
+                            package.isSelected = true
+                            summary.verificationFailed += 1
+                        }
+                        completed += 1
+                    }
+                    packages.removeAll { removeIDs.contains($0.id) }
+                } catch {
+                    let verificationWasCancelled = error is CancellationError
+                        || (error as? ProcessError)?.isCancellation == true
+                    if verificationWasCancelled {
+                        for package in verificationPackages {
+                            package.status = .failed(
+                                .verification,
+                                "Verification was cancelled after the update command completed. Retry to verify it.")
+                            package.isSelected = true
+                        }
+                        cancelled = true
+                        appendLog("\(source.name): update verification cancelled.", level: .warning)
+                    } else {
+                        for package in verificationPackages {
+                            package.status = .failed(.verification, "The update command completed, but verification failed: \(error.userMessage)")
+                            package.isSelected = true
+                        }
+                        appendLog("\(source.name): update verification failed — \(error.userMessage)", level: .error)
+                    }
+                    summary.verificationFailed += verificationPackages.count
+                    completed += verificationPackages.count
+                }
+            }
+
+            applySort()
+            if cancelled { break }
+        }
+
+        updateSummary = summary
+        if updateCount == 0 && issueSources.isEmpty {
+            scanSummary = .updatesCompleted(.now)
+        } else if issueSources.isEmpty {
+            scanSummary = .updatesAvailable(updateCount)
+        } else {
+            let issueCount = issueSources.reduce(0) { $0 + max(1, $1.scanState.issues.count) }
+            scanSummary = .completedWithIssues(updateCount: updateCount, issueCount: issueCount, completedAt: .now)
+        }
+        if cancelled || Task.isCancelled {
+            appendLog("Update run cancelled. Unverified packages remain selected and retryable.", level: .warning)
+        } else {
+            appendLog("Update run finished.", level: summary.failed + summary.verificationFailed > 0 ? .warning : .success)
+        }
+        operation = .idle
+        activeTask = nil
+    }
+
+    private func setSourceProbing(_ id: SourceID) {
+        sourceOptions.first(where: { $0.id == id })?.scanState = .probing(startedAt: .now)
+    }
+
+    private func setSourceContext(_ context: ToolContext, for id: SourceID) {
+        guard let option = sourceOptions.first(where: { $0.id == id }) else { return }
+        option.toolContext = context
+        option.probeIssue = nil
+    }
+
+    private func setSourcePhase(_ phase: SourcePhase, for id: SourceID) {
+        guard let option = sourceOptions.first(where: { $0.id == id }) else { return }
+        let startedAt: Date
+        switch option.scanState {
+        case .probing(let date), .scanning(_, let date): startedAt = date
+        default: startedAt = .now
+        }
+        option.scanState = .scanning(phase: phase, startedAt: startedAt)
+    }
+
+    private func appendOutput(commandID: String, scope: String, event: ProcessOutputEvent) {
+        let trimmed = event.line.trimmed
+        guard !trimmed.isEmpty else { return }
+        let key = "\(commandID)|\(event.stream.rawValue)"
+        guard lastOutputByCommandAndStream[key] != trimmed else { return }
+        lastOutputByCommandAndStream[key] = trimmed
+        appendLog(trimmed, level: .output, scope: scope, stream: event.stream)
+    }
+
+    private func appendLog(
+        _ message: String,
+        level: LogEntry.Level = .info,
+        scope: String? = nil,
+        stream: ProcessOutputStream? = nil
+    ) {
+        nextLogID += 1
+        logEntries.append(LogEntry(
+            id: nextLogID,
+            timestamp: .now,
+            level: level,
+            scope: scope,
+            stream: stream,
+            message: message))
+        if logEntries.count > Self.maxLogLines {
+            logEntries.removeFirst(logEntries.count - Self.maxLogLines)
+        }
+    }
+
+    private static func count(_ count: Int, singular: String, plural: String) -> String {
+        "\(count) \(count == 1 ? singular : plural)"
     }
 }
 

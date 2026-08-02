@@ -2,11 +2,40 @@ import SwiftUI
 
 @main
 struct PackManApp: App {
+    @State private var viewModel: AppViewModel
+
+    init() {
+        _viewModel = State(initialValue: AppEnvironment.makeViewModel())
+    }
+
     var body: some Scene {
-        WindowGroup("PackMan") {
-            ContentView()
-                .frame(minWidth: 760, minHeight: 480)
+        Window("PackMan", id: "main") {
+            ContentView(viewModel: viewModel)
+                .frame(minWidth: 820, minHeight: 540)
         }
-        .defaultSize(width: 980, height: 640)
+        .defaultSize(width: 1_020, height: 680)
+        .commands {
+            CommandMenu("Packages") {
+                Button(viewModel.isBusy ? "Cancel Operation" : "Scan for Updates") {
+                    viewModel.isBusy ? viewModel.cancelOperation() : viewModel.startScan()
+                }
+                .keyboardShortcut("r", modifiers: .command)
+                .disabled(viewModel.operation == .cancelling)
+
+                Button("Update Selected") {
+                    viewModel.startUpdateSelected()
+                }
+                .keyboardShortcut("u", modifiers: .command)
+                .disabled(!viewModel.canUpdate)
+
+                Divider()
+
+                Button("Select All Updates") { viewModel.selectAll() }
+                    .keyboardShortcut("a", modifiers: .command)
+                    .disabled(viewModel.isBusy || viewModel.updateCount == 0)
+                Button("Select None") { viewModel.selectNone() }
+                    .disabled(viewModel.isBusy || viewModel.updateCount == 0)
+            }
+        }
     }
 }

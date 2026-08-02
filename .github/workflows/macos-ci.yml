@@ -1,0 +1,42 @@
+name: macOS CI
+
+on:
+  pull_request:
+    paths:
+      - "macos/**"
+      - ".github/workflows/macos-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "macos/**"
+      - ".github/workflows/macos-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-15
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: macos/PackMan
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 16.4
+        run: sudo xcode-select --switch /Applications/Xcode_16.4.app/Contents/Developer
+
+      - name: Run Swift package tests
+        run: swift test --parallel
+
+      - name: Run app and UI tests
+        run: >-
+          xcodebuild test
+          -project PackMan.xcodeproj
+          -scheme PackMan
+          -destination 'platform=macOS'
+          -derivedDataPath "$RUNNER_TEMP/PackManDerivedData"
+          CODE_SIGN_STYLE=Manual
+          CODE_SIGN_IDENTITY=-
+          DEVELOPMENT_TEAM=

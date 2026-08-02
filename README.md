@@ -31,13 +31,15 @@ Pick which sources to include, hit **Scan**, select the packages you want, and c
 
 ### macOS
 
-Grab `PackMan-macOS.zip` from the [Releases](../../releases) page and unzip it. Requires macOS 14+ (Apple Silicon). The app is ad-hoc signed — on first launch, right-click → Open to bypass Gatekeeper.
+Grab `PackMan-macOS.zip` from the [Releases](https://github.com/dklasens/PackMan/releases) page and unzip it. Requires macOS 14+ and supports Apple Silicon and Intel Macs.
+
+The app is ad-hoc signed and cannot be notarized because this project does not use a paid Apple Developer account. macOS will therefore warn that Apple cannot check it for malicious software. After attempting to open it, go to **System Settings → Privacy & Security**, scroll to Security, choose **Open Anyway**, and confirm. Apple documents this override in [Safely open apps on your Mac](https://support.apple.com/102445). Only override Gatekeeper when you trust the downloaded release; the accompanying `.sha256` file can be checked with `shasum -a 256 -c PackMan-macOS.zip.sha256`.
 
 > Homebrew is the only required dependency. For the full experience: `brew install mas pipx`.
 
 ### Windows
 
-Grab the latest `UpdateManager.exe` from the [Releases](../../releases) page. It's a single self-contained file — no installer or .NET runtime required. Just download and run.
+Grab the latest `UpdateManager.exe` from the [Releases](https://github.com/dklasens/PackMan/releases) page. It's a single self-contained file — no installer or .NET runtime required. Just download and run.
 
 > Requires Windows 10/11 (x64). Updating system-level packages may prompt for administrator approval.
 
@@ -45,13 +47,18 @@ Grab the latest `UpdateManager.exe` from the [Releases](../../releases) page. It
 
 ### macOS
 
-Requirements: Xcode / Swift toolchain (macOS 14+).
+Requirements: macOS 14+ and full Xcode 16.4 or newer. Command Line Tools alone cannot create the complete app bundle.
 
 ```
 cd macos/PackMan
-swift build                # debug build
-./make-app.sh              # release build, creates dist/PackMan.app
+swift test                 # unit and integration tests
+xcodebuild test -project PackMan.xcodeproj -scheme PackMan -destination 'platform=macOS'
+./make-app.sh              # creates the app, release zip, and SHA-256 checksum
 ```
+
+`make-app.sh` builds a universal Release app, applies an ad-hoc signature, verifies the bundle, and writes `dist/PackMan.app`, `dist/PackMan-macOS.zip`, and `dist/PackMan-macOS.zip.sha256`. Override release metadata with `PACKMAN_VERSION=1.2.3` and `PACKMAN_BUILD_NUMBER=123`.
+
+Pushing a tag such as `v1.2.3` runs the macOS test suite and publishes those packaged files to a GitHub Release. The workflow needs only the repository-provided `GITHUB_TOKEN`; it does not require signing certificates, Apple credentials, or repository secrets.
 
 ### Windows
 

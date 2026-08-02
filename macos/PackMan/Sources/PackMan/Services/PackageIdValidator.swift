@@ -17,4 +17,15 @@ enum PackageIdValidator {
     static func isAllDigits(_ id: String) -> Bool {
         !id.isEmpty && id.count <= 32 && id.allSatisfy(\.isNumber)
     }
+
+    static func isValidVersion(_ version: String?) -> Bool {
+        guard let version,
+              !version.isEmpty,
+              version.count <= 128,
+              !version.hasPrefix("-"),
+              !version.contains(where: { $0.isWhitespace || $0.isNewline || $0.isASCII && $0.asciiValue! < 0x20 }) else {
+            return false
+        }
+        return true
+    }
 }

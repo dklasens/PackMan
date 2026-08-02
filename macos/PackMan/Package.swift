@@ -10,6 +10,12 @@ let package = Package(
         .executableTarget(
             name: "PackMan",
             path: "Sources/PackMan"
+        ),
+        .testTarget(
+            name: "PackManTests",
+            dependencies: ["PackMan"],
+            path: "Tests/PackManTests",
+            resources: [.process("Fixtures")]
         )
     ]
 )
