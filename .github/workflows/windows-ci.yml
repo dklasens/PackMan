@@ -1,0 +1,38 @@
+name: Windows CI
+
+on:
+  pull_request:
+    paths:
+      - "windows/**"
+      - ".github/workflows/windows-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "windows/**"
+      - ".github/workflows/windows-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-2025
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: windows
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - run: dotnet restore PackMan.sln
+      - run: dotnet build PackMan.sln --configuration Release --no-restore
+      - name: Unit and integration tests
+        run: dotnet test tests/PackMan.Tests/PackMan.Tests.csproj --configuration Release --no-build
+      - name: Verify self-contained publish
+        run: dotnet publish src/PackMan/PackMan.csproj --configuration Release --no-build --no-restore --output dist/windows
+      - name: WPF UI tests against published executable
+        env:
+          PACKMAN_UI_TEST_EXE: ${{ github.workspace }}\windows\dist\windows\PackMan.exe
+        run: dotnet test tests/PackMan.UiTests/PackMan.UiTests.csproj --configuration Release --no-build

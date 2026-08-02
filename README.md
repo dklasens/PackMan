@@ -4,7 +4,7 @@ A desktop app that scans for outdated software across multiple package managers 
 
 PackMan has two native streams sharing one repo:
 
-- **`windows/`** — WPF on .NET 8 (the original Windows app)
+- **`windows/`** — PackMan for Windows, built with WPF on .NET 8
 - **`macos/`** — SwiftUI (native macOS app)
 
 ## What it does
@@ -24,8 +24,10 @@ Pick which sources to include, hit **Scan**, select the packages you want, and c
 
 - **winget** (Windows Package Manager)
 - **Chocolatey**
+- **Scoop**
 - **npm** (global packages)
 - **pip** (Python packages)
+- **pipx** (isolated Python CLI tools)
 
 ## Download
 
@@ -39,9 +41,9 @@ The app is ad-hoc signed and cannot be notarized because this project does not u
 
 ### Windows
 
-Grab the latest `UpdateManager.exe` from the [Releases](https://github.com/dklasens/PackMan/releases) page. It's a single self-contained file — no installer or .NET runtime required. Just download and run.
+Grab the latest `PackMan-Windows-x64.zip` from the [Releases](https://github.com/dklasens/PackMan/releases) page. Extract it, then run `PackMan.exe`. The app is self-contained, so no installer or .NET runtime is required.
 
-> Requires Windows 10/11 (x64). Updating system-level packages may prompt for administrator approval.
+> Requires Windows 10/11 (x64). PackMan starts normally and requests administrator approval only when you explicitly retry an update with elevation. Optional sources can be installed separately: [Chocolatey](https://chocolatey.org/install), [Scoop](https://scoop.sh/), Node.js/npm, Python/pip, and pipx.
 
 ## Building from source
 
@@ -66,13 +68,15 @@ Requirements: .NET 8 SDK (Windows).
 
 ```
 cd windows
-dotnet build PackageManager.sln
-dotnet publish src/UpdateManager/UpdateManager.csproj /p:PublishProfile=FolderProfile
+dotnet restore PackMan.sln
+dotnet build PackMan.sln
+dotnet test PackMan.sln
+dotnet publish src/PackMan/PackMan.csproj /p:PublishProfile=FolderProfile
 ```
 
-The published single-file exe lands in `windows/src/UpdateManager/bin/Publish/`.
+The published single-file exe lands in `windows/src/PackMan/bin/Publish/`. Existing source selections are migrated once from `%APPDATA%\UpdateManager` to `%APPDATA%\PackMan`.
 
 ## Tech
 
 - **macOS**: SwiftUI, Swift concurrency, SwiftPM. Scans run concurrently; `brew outdated --json=v2` and PyPI's JSON API keep parsing robust.
-- **Windows**: WPF on .NET 8, [WPF UI](https://wpfui.lepo.co/) (Fluent/Mica design), CommunityToolkit.Mvvm.
+- **Windows**: WPF on .NET 8, [WPF UI](https://wpfui.lepo.co/) (Fluent/Mica design), CommunityToolkit.Mvvm. Scans run concurrently with per-source health, cancellation, partial-result handling, and post-update verification.

@@ -1,0 +1,30 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PackMan", "src\PackMan\PackMan.csproj", "{33D88FAE-CA08-4483-88CE-29C4692FF984}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PackMan.Tests", "tests\PackMan.Tests\PackMan.Tests.csproj", "{E7D1B893-8728-4AA9-A277-55AE5B29F69D}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PackMan.UiTests", "tests\PackMan.UiTests\PackMan.UiTests.csproj", "{0B5814B6-FC8F-464D-8B91-01F60F22E614}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{33D88FAE-CA08-4483-88CE-29C4692FF984}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{33D88FAE-CA08-4483-88CE-29C4692FF984}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{33D88FAE-CA08-4483-88CE-29C4692FF984}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{33D88FAE-CA08-4483-88CE-29C4692FF984}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E7D1B893-8728-4AA9-A277-55AE5B29F69D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E7D1B893-8728-4AA9-A277-55AE5B29F69D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E7D1B893-8728-4AA9-A277-55AE5B29F69D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E7D1B893-8728-4AA9-A277-55AE5B29F69D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0B5814B6-FC8F-464D-8B91-01F60F22E614}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0B5814B6-FC8F-464D-8B91-01F60F22E614}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0B5814B6-FC8F-464D-8B91-01F60F22E614}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0B5814B6-FC8F-464D-8B91-01F60F22E614}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

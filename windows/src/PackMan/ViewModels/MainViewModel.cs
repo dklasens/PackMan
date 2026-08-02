@@ -1,0 +1,541 @@
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Windows;
+using System.Windows.Data;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Microsoft.Win32;
+using PackMan.Models;
+using PackMan.Services;
+
+namespace PackMan.ViewModels;
+
+public partial class MainViewModel : ObservableObject
+{
+    private readonly IReadOnlyList<IPackageSource> _sources;
+    private readonly ISettingsService _settings;
+    private CancellationTokenSource? _operationCts;
+    private Task? _activeTask;
+    private long _nextLogId;
+    private readonly Dictionary<string, string> _lastOutput = [];
+
+    public MainViewModel(IEnumerable<IPackageSource> sources, ISettingsService settings)
+    {
+        _sources = sources.ToList();
+        _settings = settings;
+        SourceOptions = new(_sources.Select(source => new SourceOptionViewModel(
+            source, settings.IsSourceEnabled(source.Id), settings.GetExecutableOverride(source.Descriptor.ToolId))));
+        foreach (var option in SourceOptions) option.PropertyChanged += OnSourceOptionChanged;
+        PackagesView = CollectionViewSource.GetDefaultView(Packages);
+        PackagesView.SortDescriptions.Add(new SortDescription(nameof(PackageUpdate.Source), ListSortDirection.Ascending));
+        PackagesView.SortDescriptions.Add(new SortDescription(nameof(PackageUpdate.Name), ListSortDirection.Ascending));
+        if (settings.LoadIssue is { } issue) AppendLog(issue, LogLevel.Warning);
+    }
+
+    public ObservableCollection<PackageUpdate> Packages { get; } = [];
+    public ICollectionView PackagesView { get; }
+    public ObservableCollection<LogEntry> LogEntries { get; } = [];
+    public ObservableCollection<SourceOptionViewModel> SourceOptions { get; }
+
+    [ObservableProperty] private AppOperationKind _operation = AppOperationKind.Idle;
+    [ObservableProperty] private ScanSummaryKind _scanSummary = ScanSummaryKind.NotStarted;
+    [ObservableProperty] private UpdateRunSummary? _updateSummary;
+    [ObservableProperty] private bool _isLogVisible;
+    [ObservableProperty] private int _operationCompleted;
+    [ObservableProperty] private int _operationTotal;
+    [ObservableProperty] private string? _currentItem;
+
+    public bool IsBusy => Operation != AppOperationKind.Idle;
+    public int UpdateCount => Packages.Count(p => p.IsActionable);
+    public int SelectedCount => Packages.Count(p => p.IsActionable && p.IsSelected);
+    public bool CanUpdate => !IsBusy && SelectedCount > 0;
+    public bool HasPackages => Packages.Count > 0;
+    public bool HasSourceIssues => SourceOptions.Any(o => o.HasIssue);
+    public int SourceIssueCount => SourceOptions.Count(o => o.HasIssue);
+    public bool ShowIssueBanner => ScanSummary is ScanSummaryKind.CompletedWithIssues
+        or ScanSummaryKind.AllUnavailable or ScanSummaryKind.Cancelled;
+    public bool ShowSourceProgress => Operation is AppOperationKind.Scanning or AppOperationKind.Cancelling
+        && SourceOptions.Any(o => o.State.Status is SourceScanStatus.Probing or SourceScanStatus.Scanning or SourceScanStatus.Waiting);
+    public string ScanButtonText => IsBusy ? (Operation == AppOperationKind.Cancelling ? "Cancelling" : "Cancel") : "Scan";
+    public string UpdateButtonText => SelectedCount > 0 ? $"Update {SelectedCount}" : "Update Selected";
+    public string LogButtonText => IsLogVisible ? "Hide Log" : "Show Log";
+    public string FooterText => $"{UpdateCount} update{(UpdateCount == 1 ? "" : "s")} • {SelectedCount} selected";
+    public string StatusText => ScanSummary switch
+    {
+        ScanSummaryKind.NotStarted => "Ready. Scan enabled sources for updates.",
+        ScanSummaryKind.Running => $"Scanning sources ({OperationCompleted}/{OperationTotal})…",
+        ScanSummaryKind.UpdatesAvailable => $"{UpdateCount} update{(UpdateCount == 1 ? "" : "s")} available.",
+        ScanSummaryKind.UpdatesCompleted => UpdateSummary is null ? "Updates completed." :
+            $"Updated {UpdateSummary.Updated}; failed {UpdateSummary.Failed + UpdateSummary.VerificationFailed}.",
+        ScanSummaryKind.UpToDate => "System is up to date. Every enabled source completed successfully.",
+        ScanSummaryKind.CompletedWithIssues => $"Scan completed with issues; {UpdateCount} update{(UpdateCount == 1 ? "" : "s")} found.",
+        ScanSummaryKind.AllUnavailable => "No enabled source could be scanned.",
+        ScanSummaryKind.NoSources => "No sources selected.",
+        ScanSummaryKind.Cancelled => "Scan cancelled. Completed source results were preserved.",
+        _ => string.Empty,
+    };
+    public string EmptyTitle => ScanSummary switch
+    {
+        ScanSummaryKind.NotStarted => "Ready to Scan",
+        ScanSummaryKind.Running => "Scanning Sources",
+        ScanSummaryKind.UpdatesCompleted => "Updates Completed",
+        ScanSummaryKind.UpToDate => "System is Up to Date",
+        ScanSummaryKind.CompletedWithIssues => "Scan Completed with Issues",
+        ScanSummaryKind.AllUnavailable => "No Sources Could Be Scanned",
+        ScanSummaryKind.NoSources => "No Sources Selected",
+        ScanSummaryKind.Cancelled => "Scan Cancelled",
+        _ => "No Displayable Updates",
+    };
+    public string EmptyDescription => ScanSummary switch
+    {
+        ScanSummaryKind.NotStarted => "Check your enabled package managers for available updates.",
+        ScanSummaryKind.Running => "Updates appear as each source completes.",
+        ScanSummaryKind.UpdatesCompleted => "The selected packages were updated and verified.",
+        ScanSummaryKind.UpToDate => "Every enabled source completed successfully.",
+        ScanSummaryKind.CompletedWithIssues => "Some sources could not be checked, so these results may be incomplete.",
+        ScanSummaryKind.AllUnavailable => "Open Sources to review executable paths and installation guidance.",
+        ScanSummaryKind.NoSources => "Enable at least one package manager in Sources.",
+        ScanSummaryKind.Cancelled => "Completed source results were preserved; this is not a full system check.",
+        _ => string.Empty,
+    };
+
+    [RelayCommand]
+    private void ScanOrCancel()
+    {
+        if (IsBusy)
+        {
+            if (Operation != AppOperationKind.Cancelling)
+            {
+                Operation = AppOperationKind.Cancelling;
+                AppendLog("Cancellation requested…", LogLevel.Warning);
+                _operationCts?.Cancel();
+            }
+            return;
+        }
+        StartOperation(ct => RunScanAsync(SourceOptions.Where(o => o.IsEnabled).Select(o => o.Id).ToHashSet(), true, ct));
+    }
+
+    [RelayCommand]
+    private void RetryIssues()
+    {
+        if (IsBusy) return;
+        var ids = SourceOptions.Where(o => o.HasIssue).Select(o => o.Id).ToHashSet();
+        if (ids.Count > 0) StartOperation(ct => RunScanAsync(ids, false, ct));
+    }
+
+    [RelayCommand(CanExecute = nameof(CanUpdate))]
+    private void UpdateSelected() => StartUpdates(Packages.Where(p => p.IsActionable && p.IsSelected).Select(p => (p, false)).ToList());
+
+    [RelayCommand]
+    private void UpdateSingle(PackageUpdate? package)
+    {
+        if (!IsBusy && package?.IsActionable == true) StartUpdates([(package, false)]);
+    }
+
+    [RelayCommand]
+    private void RetryElevated(PackageUpdate? package)
+    {
+        if (!IsBusy && package?.IsActionable == true) StartUpdates([(package, true)]);
+    }
+
+    [RelayCommand] private void SelectAll() { foreach (var package in Packages.Where(p => p.IsActionable)) package.IsSelected = true; RefreshComputed(); }
+    [RelayCommand] private void SelectNone() { foreach (var package in Packages) package.IsSelected = false; RefreshComputed(); }
+    [RelayCommand] private void ToggleLog() => IsLogVisible = !IsLogVisible;
+    [RelayCommand] private void ClearLog() => LogEntries.Clear();
+    [RelayCommand]
+    private void CopyPackageId(PackageUpdate? package)
+    {
+        if (package is not null) Clipboard.SetText(package.PackageId);
+    }
+    [RelayCommand]
+    private void CopyLog()
+    {
+        if (LogEntries.Count > 0) Clipboard.SetText(string.Join(Environment.NewLine, LogEntries.Select(e => e.DisplayText)));
+    }
+
+    [RelayCommand]
+    private void ChooseExecutable(SourceOptionViewModel? option)
+    {
+        if (option is null || IsBusy) return;
+        var picker = new OpenFileDialog { Title = $"Choose {option.Descriptor.ExecutableName}", CheckFileExists = true };
+        if (picker.ShowDialog() == true) SetExecutableOverride(option, picker.FileName);
+    }
+
+    [RelayCommand]
+    private void UseAutomatic(SourceOptionViewModel? option)
+    {
+        if (option is not null && !IsBusy) SetExecutableOverride(option, null);
+    }
+
+    private void SetExecutableOverride(SourceOptionViewModel option, string? path)
+    {
+        try
+        {
+            _settings.SetExecutableOverride(option.Descriptor.ToolId, path);
+            foreach (var related in SourceOptions.Where(o => o.Descriptor.ToolId == option.Descriptor.ToolId))
+            {
+                related.ExecutableOverride = path;
+                related.ToolContext = null;
+                related.ProbeIssue = null;
+                related.State.Set(related.IsEnabled ? SourceScanStatus.NotScanned : SourceScanStatus.Disabled);
+                RemovePackages(related.Id);
+                related.Refresh();
+            }
+        }
+        catch (Exception ex) { AppendLog($"Could not save executable setting: {ex.Message}", LogLevel.Error); }
+        RefreshComputed();
+    }
+
+    private void StartUpdates(IReadOnlyList<(PackageUpdate Package, bool Elevated)> packages)
+    {
+        if (IsBusy || packages.Count == 0) return;
+        StartOperation(ct => RunUpdatesAsync(packages, ct));
+    }
+
+    private void StartOperation(Func<CancellationToken, Task> work)
+    {
+        if (_activeTask is not null) return;
+        _operationCts = new CancellationTokenSource();
+        _activeTask = Task.CompletedTask;
+        var task = RunOwnedAsync(work, _operationCts.Token);
+        _activeTask = task.IsCompleted ? null : task;
+    }
+
+    private async Task RunOwnedAsync(Func<CancellationToken, Task> work, CancellationToken cancellationToken)
+    {
+        try { await work(cancellationToken); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { AppendLog(ex.Message, LogLevel.Error); }
+        finally
+        {
+            CurrentItem = null;
+            _operationCts?.Dispose();
+            _operationCts = null;
+            _activeTask = null;
+            Operation = AppOperationKind.Idle;
+            RefreshComputed();
+        }
+    }
+
+    private async Task RunScanAsync(HashSet<SourceId> ids, bool fresh, CancellationToken cancellationToken)
+    {
+        var options = SourceOptions.Where(o => ids.Contains(o.Id) && o.IsEnabled).ToList();
+        if (options.Count == 0) { ScanSummary = ScanSummaryKind.NoSources; RefreshComputed(); return; }
+        Operation = AppOperationKind.Scanning;
+        ScanSummary = ScanSummaryKind.Running;
+        OperationCompleted = 0;
+        OperationTotal = options.Count;
+        UpdateSummary = null;
+        if (fresh)
+        {
+            Packages.Clear();
+            foreach (var option in SourceOptions)
+            {
+                option.State.Set(option.IsEnabled ? SourceScanStatus.Waiting : SourceScanStatus.Disabled);
+                option.ToolContext = null;
+                option.ProbeIssue = null;
+                option.Refresh();
+            }
+        }
+        else
+        {
+            foreach (var option in options) { option.State.Set(SourceScanStatus.Waiting); option.Refresh(); }
+        }
+        AppendLog(fresh ? $"Scan started ({string.Join(", ", options.Select(o => o.Name))})."
+            : $"Retrying sources with issues ({string.Join(", ", options.Select(o => o.Name))}).");
+
+        var pending = options.Select(option => ScanOneAsync(option, cancellationToken)).ToList();
+        var cancelled = false;
+        while (pending.Count > 0)
+        {
+            var completedTask = await Task.WhenAny(pending);
+            pending.Remove(completedTask);
+            var outcome = await completedTask;
+            ApplyOutcome(outcome);
+            OperationCompleted++;
+            cancelled |= outcome.Kind == OutcomeKind.Cancelled;
+            if (Operation != AppOperationKind.Cancelling) Operation = AppOperationKind.Scanning;
+            RefreshComputed();
+        }
+        if (cancelled || cancellationToken.IsCancellationRequested)
+        {
+            ScanSummary = ScanSummaryKind.Cancelled;
+            AppendLog("Scan cancelled. Completed source results were preserved.", LogLevel.Warning);
+        }
+        else DeriveScanSummary();
+    }
+
+    private async Task<SourceOutcome> ScanOneAsync(SourceOptionViewModel option, CancellationToken cancellationToken)
+    {
+        option.State.Set(SourceScanStatus.Probing, SourcePhase.Probing); option.Refresh();
+        try
+        {
+            var probe = await option.Source.ProbeAsync(cancellationToken);
+            if (!probe.IsAvailable) return new(option, OutcomeKind.Unavailable, Issue: probe.Issue);
+            option.ToolContext = probe.Context;
+            option.ProbeIssue = null;
+            option.State.Set(SourceScanStatus.Scanning, SourcePhase.Scanning); option.Refresh();
+            var progress = new Progress<SourcePhase>(phase => { option.State.Set(SourceScanStatus.Scanning, phase); option.Refresh(); });
+            var report = await option.Source.ScanAsync(probe.Context!, progress, cancellationToken);
+            return new(option, OutcomeKind.Report, report);
+        }
+        catch (OperationCanceledException) { return new(option, OutcomeKind.Cancelled); }
+        catch (Exception ex)
+        {
+            var kind = ex is SourceException source ? source.Kind : SourceIssueKind.Command;
+            return new(option, OutcomeKind.Failed, Issue: new(kind, ex.Message, "Open the log for details and retry."));
+        }
+    }
+
+    private void ApplyOutcome(SourceOutcome outcome)
+    {
+        var option = outcome.Option;
+        switch (outcome.Kind)
+        {
+            case OutcomeKind.Report:
+                var report = outcome.Report!;
+                ReplacePackages(option, report.Updates);
+                option.State.Set(report.Issues.Count == 0 ? SourceScanStatus.Succeeded : SourceScanStatus.Partial,
+                    updateCount: report.Updates.Count, issues: report.Issues);
+                AppendLog($"{option.Name}: {(report.Issues.Count == 0 ? "" : "partial • ")}{report.Updates.Count} update(s).",
+                    report.Issues.Count == 0 ? LogLevel.Info : LogLevel.Warning);
+                foreach (var issue in report.Issues) AppendLog(issue.Message, LogLevel.Warning, option.Name);
+                break;
+            case OutcomeKind.Unavailable:
+                option.ProbeIssue = outcome.Issue;
+                option.State.Set(SourceScanStatus.Unavailable, issues: outcome.Issue is null ? [] : [outcome.Issue]);
+                AppendLog($"{option.Name}: unavailable — {outcome.Issue?.Message}", LogLevel.Warning);
+                break;
+            case OutcomeKind.Failed:
+                option.State.Set(SourceScanStatus.Failed, issues: outcome.Issue is null ? [] : [outcome.Issue]);
+                AppendLog($"{option.Name}: scan failed — {outcome.Issue?.Message}", LogLevel.Error);
+                IsLogVisible = true;
+                break;
+            case OutcomeKind.Cancelled:
+                option.State.Set(SourceScanStatus.Cancelled);
+                AppendLog($"{option.Name}: cancelled.", LogLevel.Warning);
+                break;
+        }
+        option.Refresh();
+    }
+
+    private void DeriveScanSummary()
+    {
+        var enabled = SourceOptions.Where(o => o.IsEnabled).ToList();
+        if (enabled.Count == 0) ScanSummary = ScanSummaryKind.NoSources;
+        else if (enabled.All(o => o.State.Status == SourceScanStatus.Unavailable)) ScanSummary = ScanSummaryKind.AllUnavailable;
+        else if (enabled.Any(o => o.State.HasIssue)) ScanSummary = ScanSummaryKind.CompletedWithIssues;
+        else ScanSummary = UpdateCount == 0 ? ScanSummaryKind.UpToDate : ScanSummaryKind.UpdatesAvailable;
+        AppendLog($"Scan complete. {UpdateCount} update(s) found.", HasSourceIssues ? LogLevel.Warning : LogLevel.Info);
+        RefreshComputed();
+    }
+
+    private async Task RunUpdatesAsync(IReadOnlyList<(PackageUpdate Package, bool Elevated)> selected,
+        CancellationToken cancellationToken)
+    {
+        Operation = AppOperationKind.Updating;
+        OperationCompleted = 0;
+        OperationTotal = selected.Count;
+        IsLogVisible = true;
+        AppendLog($"Updating {selected.Count} selected package(s).");
+        var updated = 0; var failed = 0; var cancelled = 0; var verificationFailed = 0;
+        foreach (var group in selected.GroupBy(item => item.Package.SourceId))
+        {
+            var verification = new List<(PackageUpdate Package, UpdateRequest Request)>();
+            foreach (var item in group)
+            {
+                var package = item.Package;
+                if (cancellationToken.IsCancellationRequested) { cancelled++; break; }
+                CurrentItem = package.Name;
+                var request = package.ToRequest(item.Elevated);
+                if (package.NeedsVerificationOnly)
+                {
+                    package.Status = UpdateStatus.Verifying;
+                    verification.Add((package, request));
+                    continue;
+                }
+                package.Status = UpdateStatus.Updating;
+                package.StatusMessage = null;
+                package.CanRetryElevated = false;
+                var progress = new Progress<ProcessOutputEvent>(output => AppendOutput(package, output));
+                try
+                {
+                    await package.SourceRef.UpdateAsync(request, package.ToolContext, progress, cancellationToken);
+                    package.Status = UpdateStatus.Verifying;
+                    verification.Add((package, request));
+                }
+                catch (OperationCanceledException)
+                {
+                    package.Status = UpdateStatus.Cancelled; package.IsSelected = true; cancelled++; break;
+                }
+                catch (Exception ex)
+                {
+                    package.Status = UpdateStatus.Failed;
+                    package.FailureKind = UpdateFailureKind.Update;
+                    package.StatusMessage = ex.Message;
+                    package.CanRetryElevated = ex is SourceException { CanRetryElevated: true };
+                    package.IsSelected = true;
+                    failed++;
+                    OperationCompleted++;
+                    AppendLog($"Update failed — {ex.Message}", LogLevel.Error, package.Name);
+                }
+            }
+            if (verification.Count == 0) continue;
+            try
+            {
+                var source = verification[0].Package.SourceRef;
+                var results = await source.VerifyAsync(verification.Select(v => v.Request).ToList(),
+                    verification[0].Package.ToolContext, cancellationToken);
+                foreach (var (package, _) in verification)
+                {
+                    if (results.TryGetValue(package.PackageId, out var result) && result.IsSatisfied)
+                    {
+                        if (!string.IsNullOrWhiteSpace(result.InstalledVersion)) package.CurrentVersion = result.InstalledVersion;
+                        package.IsSelected = false;
+                        Packages.Remove(package);
+                        updated++;
+                        AppendLog($"Updated to {package.CurrentVersion}.", LogLevel.Success, package.Name);
+                    }
+                    else
+                    {
+                        if (result?.StillOutdated is { } info)
+                        {
+                            package.CurrentVersion = info.CurrentVersion;
+                            package.AvailableVersion = info.AvailableVersion;
+                        }
+                        package.Status = UpdateStatus.Failed;
+                        package.FailureKind = UpdateFailureKind.Update;
+                        package.StatusMessage = "The package is still outdated after the update command completed.";
+                        package.IsSelected = true;
+                        failed++;
+                    }
+                    OperationCompleted++;
+                }
+            }
+            catch (Exception ex)
+            {
+                foreach (var (package, _) in verification)
+                {
+                    package.Status = UpdateStatus.Failed;
+                    package.FailureKind = UpdateFailureKind.Verification;
+                    package.StatusMessage = $"The update command completed, but verification failed: {ex.Message}";
+                    package.IsSelected = true;
+                    verificationFailed++;
+                    OperationCompleted++;
+                }
+                AppendLog($"Verification failed — {ex.Message}", LogLevel.Error, verification[0].Package.Source);
+            }
+            if (cancellationToken.IsCancellationRequested) break;
+        }
+        UpdateSummary = new(updated, failed, cancelled, verificationFailed);
+        ScanSummary = HasSourceIssues ? ScanSummaryKind.CompletedWithIssues
+            : UpdateCount == 0 ? ScanSummaryKind.UpdatesCompleted : ScanSummaryKind.UpdatesAvailable;
+        AppendLog(cancellationToken.IsCancellationRequested ? "Update run cancelled." : "Update run finished.",
+            failed + verificationFailed > 0 ? LogLevel.Warning : LogLevel.Success);
+        RefreshComputed();
+    }
+
+    private void ReplacePackages(SourceOptionViewModel option, IReadOnlyList<PackageInfo> infos)
+    {
+        RemovePackages(option.Id);
+        foreach (var info in infos)
+        {
+            var package = new PackageUpdate
+            {
+                SourceRef = option.Source,
+                ToolContext = option.ToolContext!,
+                SourceId = option.Id,
+                PackageId = info.Id,
+                Name = info.Name,
+                Source = option.Name,
+                CurrentVersion = info.CurrentVersion,
+                AvailableVersion = info.AvailableVersion,
+                Status = info.StatusMessage is null ? UpdateStatus.Pending : UpdateStatus.Failed,
+                FailureKind = info.StatusMessage is null ? null : UpdateFailureKind.Verification,
+                StatusMessage = info.StatusMessage,
+            };
+            package.PropertyChanged += OnPackageChanged;
+            Packages.Add(package);
+        }
+        PackagesView.Refresh();
+    }
+
+    private void RemovePackages(SourceId sourceId)
+    {
+        foreach (var package in Packages.Where(p => p.SourceId == sourceId).ToList())
+        {
+            package.PropertyChanged -= OnPackageChanged;
+            Packages.Remove(package);
+        }
+    }
+
+    private void OnPackageChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is nameof(PackageUpdate.IsSelected) or nameof(PackageUpdate.Status)) RefreshComputed();
+        if (e.PropertyName is nameof(PackageUpdate.Name) or nameof(PackageUpdate.Source)
+            or nameof(PackageUpdate.CurrentVersion) or nameof(PackageUpdate.AvailableVersion)
+            or nameof(PackageUpdate.StatusTitle)) PackagesView.Refresh();
+    }
+
+    private void OnSourceOptionChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(SourceOptionViewModel.IsEnabled) || sender is not SourceOptionViewModel option) return;
+        if (IsBusy) { option.IsEnabled = !option.IsEnabled; return; }
+        try
+        {
+            _settings.SetSourceEnabled(option.Id, option.IsEnabled);
+            if (!option.IsEnabled) RemovePackages(option.Id);
+            option.State.Set(option.IsEnabled ? SourceScanStatus.NotScanned : SourceScanStatus.Disabled);
+            option.Refresh();
+        }
+        catch (Exception ex) { AppendLog($"Could not save source setting: {ex.Message}", LogLevel.Error); }
+        RefreshComputed();
+    }
+
+    private void AppendOutput(PackageUpdate package, ProcessOutputEvent output)
+    {
+        var line = output.Line.Trim();
+        if (line.Length == 0) return;
+        var key = $"{package.Id}|{output.Stream}";
+        if (_lastOutput.GetValueOrDefault(key) == line) return;
+        _lastOutput[key] = line;
+        AppendLog(line, LogLevel.Output, package.Name, output.Stream);
+    }
+
+    private void AppendLog(string message, LogLevel level = LogLevel.Info, string? scope = null,
+        ProcessOutputStream? stream = null)
+    {
+        LogEntries.Add(new(++_nextLogId, DateTimeOffset.Now, level, message, scope, stream));
+        while (LogEntries.Count > 1000) LogEntries.RemoveAt(0);
+    }
+
+    private void RefreshComputed()
+    {
+        OnPropertyChanged(nameof(IsBusy));
+        OnPropertyChanged(nameof(UpdateCount));
+        OnPropertyChanged(nameof(SelectedCount));
+        OnPropertyChanged(nameof(CanUpdate));
+        OnPropertyChanged(nameof(HasPackages));
+        OnPropertyChanged(nameof(HasSourceIssues));
+        OnPropertyChanged(nameof(SourceIssueCount));
+        OnPropertyChanged(nameof(ShowIssueBanner));
+        OnPropertyChanged(nameof(ShowSourceProgress));
+        OnPropertyChanged(nameof(ScanButtonText));
+        OnPropertyChanged(nameof(UpdateButtonText));
+        OnPropertyChanged(nameof(LogButtonText));
+        OnPropertyChanged(nameof(FooterText));
+        OnPropertyChanged(nameof(StatusText));
+        OnPropertyChanged(nameof(EmptyTitle));
+        OnPropertyChanged(nameof(EmptyDescription));
+        UpdateSelectedCommand.NotifyCanExecuteChanged();
+    }
+
+    partial void OnOperationChanged(AppOperationKind value) => RefreshComputed();
+    partial void OnScanSummaryChanged(ScanSummaryKind value) => RefreshComputed();
+    partial void OnIsLogVisibleChanged(bool value) => RefreshComputed();
+    partial void OnOperationCompletedChanged(int value) => OnPropertyChanged(nameof(StatusText));
+    partial void OnOperationTotalChanged(int value) => OnPropertyChanged(nameof(StatusText));
+
+    private enum OutcomeKind { Report, Unavailable, Failed, Cancelled }
+    private sealed record SourceOutcome(SourceOptionViewModel Option, OutcomeKind Kind,
+        SourceScanReport? Report = null, SourceIssue? Issue = null);
+}

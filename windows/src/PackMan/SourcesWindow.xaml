@@ -1,0 +1,62 @@
+<ui:FluentWindow x:Class="PackMan.SourcesWindow"
+        x:Name="Root"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+        Title="PackMan Sources" Width="720" Height="560" MinWidth="620" MinHeight="430"
+        WindowStartupLocation="CenterOwner" WindowBackdropType="Mica" ExtendsContentIntoTitleBar="True"
+        Icon="pack://application:,,,/Assets/app.ico">
+    <ui:FluentWindow.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVis" />
+        <local:InverseBooleanConverter xmlns:local="clr-namespace:PackMan" x:Key="InverseBool" />
+    </ui:FluentWindow.Resources>
+    <DockPanel>
+        <ui:TitleBar DockPanel.Dock="Top" Title="Sources" />
+        <Grid>
+            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+            <StackPanel Margin="20,14,20,12">
+                <TextBlock Text="Sources" FontSize="24" FontWeight="SemiBold" />
+                <TextBlock Text="Choose package managers and the executables PackMan should use."
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,3,0,0" />
+            </StackPanel>
+            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                <ItemsControl ItemsSource="{Binding SourceOptions}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Padding="18,13" BorderThickness="0,1,0,0" BorderBrush="#18000000">
+                                <Grid>
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="165" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                    <CheckBox Grid.Column="0" Content="{Binding Name}" IsChecked="{Binding IsEnabled, Mode=TwoWay}"
+                                              IsEnabled="{Binding DataContext.IsBusy, ElementName=Root, Converter={StaticResource InverseBool}}"
+                                              FontWeight="SemiBold" VerticalAlignment="Top" Margin="0,4,12,0" />
+                                    <StackPanel Grid.Column="1" Margin="0,0,14,0">
+                                        <TextBlock Text="{Binding StatusText}" />
+                                        <TextBlock Text="{Binding ExecutablePath}" FontFamily="Consolas" FontSize="11"
+                                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis"
+                                                   ToolTip="{Binding ExecutablePath}" Margin="0,4,0,0" />
+                                        <TextBlock Text="{Binding VersionAndOrigin}" FontSize="11"
+                                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                        <TextBlock Text="{Binding IssueText}" FontSize="11" TextWrapping="Wrap" Foreground="#FFF59E0B" Margin="0,4,0,0" />
+                                        <TextBlock Text="{Binding RecoveryText}" FontSize="11" TextWrapping="Wrap"
+                                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="2">
+                                        <ui:Button Content="Choose…" Command="{Binding DataContext.ChooseExecutableCommand, ElementName=Root}"
+                                                   CommandParameter="{Binding}" Margin="0,0,0,5" />
+                                        <ui:Button Content="Use Automatic" Command="{Binding DataContext.UseAutomaticCommand, ElementName=Root}"
+                                                   CommandParameter="{Binding}" Visibility="{Binding HasOverride, Converter={StaticResource BoolToVis}}" Margin="0,0,0,5" />
+                                        <ui:Button Content="Installation Help" Tag="{Binding Descriptor.InstallationUrl}" Click="InstallationHelp_Click"
+                                                   Visibility="{Binding ShowInstallationHelp, Converter={StaticResource BoolToVis}}" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+            <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="16,10">
+                <ui:Button Content="Done" IsDefault="True" Click="Done_Click" Padding="18,6" />
+            </StackPanel>
+        </Grid>
+    </DockPanel>
+</ui:FluentWindow>
