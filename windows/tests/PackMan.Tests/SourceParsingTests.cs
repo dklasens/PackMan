@@ -112,6 +112,19 @@ public sealed class SourceParsingTests
         Assert.Single(report.Issues);
     }
 
+    [Fact]
+    public async Task ChocoUpdateAlwaysRunsElevated()
+    {
+        var runner = new StubRunner();
+        runner.Enqueue(new(0, "upgraded", ""));
+        var source = new ChocoSource(new StubResolver(), runner);
+        var context = new ToolContext("choco.exe", "2.7.3", ToolResolutionOrigin.Custom, []);
+        await source.UpdateAsync(new("ripgrep", "ripgrep", "14.1.1"), context);
+        var invocation = Assert.Single(runner.Invocations);
+        Assert.True(invocation.Elevated);
+        Assert.Contains("ripgrep", invocation.Arguments);
+    }
+
     private sealed class NeverCalledHandler : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>

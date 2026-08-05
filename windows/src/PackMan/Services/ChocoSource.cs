@@ -37,7 +37,7 @@ public sealed class ChocoSource(IToolResolver resolver, IProcessRunner runner) :
         Validate(request);
         var result = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
             Arguments(context, "upgrade", request.PackageId, "--version", request.TargetVersion, "-y", "--no-progress"),
-            context.Environment, TimeSpan.FromMinutes(15), request.Elevated), output, cancellationToken);
+            context.Environment, TimeSpan.FromMinutes(15), Elevated: true), output, cancellationToken);
         if (!result.Success) throw SourceSupport.CommandFailure("choco upgrade", result);
     }
 }
