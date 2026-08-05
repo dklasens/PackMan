@@ -102,6 +102,9 @@
                                         <MenuItem Header="Update / Retry" Command="{Binding Data.UpdateSingleCommand, Source={StaticResource VmProxy}}" CommandParameter="{Binding}" />
                                         <MenuItem Header="Retry as administrator" Command="{Binding Data.RetryElevatedCommand, Source={StaticResource VmProxy}}" CommandParameter="{Binding}" />
                                         <Separator />
+                                        <MenuItem Header="Ignore This Update" Command="{Binding Data.IgnoreUpdateVersionCommand, Source={StaticResource VmProxy}}" CommandParameter="{Binding}" />
+                                        <MenuItem Header="Ignore Package (All Versions)" Command="{Binding Data.IgnorePackageCommand, Source={StaticResource VmProxy}}" CommandParameter="{Binding}" />
+                                        <Separator />
                                         <MenuItem Header="Copy Package ID" Command="{Binding Data.CopyPackageIdCommand, Source={StaticResource VmProxy}}" CommandParameter="{Binding}" />
                                     </ContextMenu>
                                 </Setter.Value>

@@ -1,7 +1,7 @@
 namespace PackMan.Services;
 
-public enum SourceId { Winget, Chocolatey, Scoop, Npm, Pip, Pipx }
-public enum ToolId { Winget, Chocolatey, Scoop, Npm, Node, Python, Pip, Pipx }
+public enum SourceId { Winget, Chocolatey, Scoop, Npm, Pip, Pipx, Dotnet }
+public enum ToolId { Winget, Chocolatey, Scoop, Npm, Node, Python, Pip, Pipx, Dotnet }
 public enum ToolResolutionOrigin { Custom, Path, KnownLocation, UserLocation, VersionManager }
 public enum SourceIssueKind { Unavailable, Command, Parsing, Network, Configuration, Verification }
 public enum SourcePhase { Probing, Refreshing, Scanning, Verifying }

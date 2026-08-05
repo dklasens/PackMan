@@ -20,6 +20,10 @@ internal sealed class UiTestSettings : ISettingsService
     public void SetSourceEnabled(SourceId id, bool enabled) { }
     public string? GetExecutableOverride(ToolId id) => null;
     public void SetExecutableOverride(ToolId id, string? path) { }
+    public ToolContext? GetCachedContext(SourceId id) => null;
+    public void SetCachedContext(SourceId id, ToolContext? context) { }
+    public IReadOnlySet<string> GetIgnoredUpdates() => new HashSet<string>();
+    public void SetUpdateIgnored(string key, bool ignored) { }
 }
 
 internal sealed class UiTestPackageSource(string scenario) : IPackageSource

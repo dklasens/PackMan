@@ -25,8 +25,11 @@ public partial class MainWindow : FluentWindow
         _elapsedTimer.Start();
     }
 
-    private void Sources_Click(object sender, RoutedEventArgs e) =>
+    private void Sources_Click(object sender, RoutedEventArgs e)
+    {
+        _viewModel.ReloadIgnored();
         new SourcesWindow(_viewModel) { Owner = this }.ShowDialog();
+    }
 
     private void OnLogEntriesChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {

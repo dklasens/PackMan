@@ -13,14 +13,22 @@ public sealed class PipxSource(IToolResolver resolver, IProcessRunner runner, Ht
         [Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Python", "Scripts", "pipx.exe")],
         "https://pipx.pypa.io/stable/installation/");
 
+    private bool? _nativeOutdatedSupported;
+
     public override async Task<SourceScanReport> ScanAsync(ToolContext context,
         IProgress<SourcePhase>? progress = null, CancellationToken cancellationToken = default)
     {
         progress?.Report(SourcePhase.Scanning);
-        var help = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
-            Arguments(context, "list", "--help"), context.Environment, TimeSpan.FromSeconds(20)),
-            cancellationToken: cancellationToken);
-        return help.Success && help.StdOut.Contains("--outdated") && help.StdOut.Contains("--output")
+        var supported = _nativeOutdatedSupported;
+        if (supported is null)
+        {
+            var help = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
+                Arguments(context, "list", "--help"), context.Environment, TimeSpan.FromSeconds(20)),
+                cancellationToken: cancellationToken);
+            supported = help.Success && help.StdOut.Contains("--outdated") && help.StdOut.Contains("--output");
+            _nativeOutdatedSupported = supported;
+        }
+        return supported.Value
             ? await ScanNativeAsync(context, cancellationToken)
             : await ScanLegacyAsync(context, cancellationToken);
     }

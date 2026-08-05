@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Security.Principal;
 using System.Text;
 
 namespace PackMan.Services;
@@ -32,9 +33,21 @@ public sealed class ProcessRunner(IElevationBroker elevationBroker) : IProcessRu
 
     public Task<ProcessResult> RunAsync(ProcessInvocation invocation,
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default) =>
-        invocation.Elevated
+        invocation.Elevated && !IsCurrentProcessElevated
             ? elevationBroker.RunAsync(invocation with { Elevated = false }, output, cancellationToken)
             : RunLocalAsync(invocation, output, cancellationToken);
+
+    internal static bool IsCurrentProcessElevated { get; } = CheckElevation();
+
+    private static bool CheckElevation()
+    {
+        try
+        {
+            using var identity = WindowsIdentity.GetCurrent();
+            return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+        }
+        catch { return false; }
+    }
 
     internal static async Task<ProcessResult> RunLocalAsync(ProcessInvocation invocation,
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)

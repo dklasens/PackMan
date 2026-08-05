@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Http;
 using PackMan.Services;
 
 namespace PackMan.Tests;
@@ -34,10 +36,21 @@ internal sealed class StubElevationBroker : IElevationBroker
         CancellationToken cancellationToken) => throw new NotSupportedException();
 }
 
+internal sealed class StubHttpHandler(Func<Uri, HttpResponseMessage> responder) : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+        Task.FromResult(responder(request.RequestUri!));
+
+    public static HttpClient JsonClient(string json) => new(new StubHttpHandler(_ =>
+        new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(json, System.Text.Encoding.UTF8) }));
+}
+
 internal sealed class MemorySettings : ISettingsService
 {
     private readonly HashSet<SourceId> _disabled = [];
     private readonly Dictionary<ToolId, string> _overrides = [];
+    private readonly Dictionary<SourceId, ToolContext> _contexts = [];
+    private readonly HashSet<string> _ignored = new(StringComparer.OrdinalIgnoreCase);
     public string? LoadIssue => null;
     public bool IsSourceEnabled(SourceId id) => !_disabled.Contains(id);
     public void SetSourceEnabled(SourceId id, bool enabled) { if (enabled) _disabled.Remove(id); else _disabled.Add(id); }
@@ -46,6 +59,13 @@ internal sealed class MemorySettings : ISettingsService
     {
         if (path is null) _overrides.Remove(id); else _overrides[id] = path;
     }
+    public ToolContext? GetCachedContext(SourceId id) => _contexts.GetValueOrDefault(id);
+    public void SetCachedContext(SourceId id, ToolContext? context)
+    {
+        if (context is null) _contexts.Remove(id); else _contexts[id] = context;
+    }
+    public IReadOnlySet<string> GetIgnoredUpdates() => _ignored;
+    public void SetUpdateIgnored(string key, bool ignored) { if (ignored) _ignored.Add(key); else _ignored.Remove(key); }
 }
 
 internal sealed class StubSource(

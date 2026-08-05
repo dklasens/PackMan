@@ -9,6 +9,10 @@ public interface ISettingsService
     void SetSourceEnabled(SourceId id, bool enabled);
     string? GetExecutableOverride(ToolId id);
     void SetExecutableOverride(ToolId id, string? path);
+    ToolContext? GetCachedContext(SourceId id);
+    void SetCachedContext(SourceId id, ToolContext? context);
+    IReadOnlySet<string> GetIgnoredUpdates();
+    void SetUpdateIgnored(string key, bool ignored);
 }
 
 public sealed class SettingsService : ISettingsService
@@ -57,6 +61,53 @@ public sealed class SettingsService : ISettingsService
         }
     }
 
+    public ToolContext? GetCachedContext(SourceId id)
+    {
+        lock (_sync)
+        {
+            if (!_data.CachedTools.TryGetValue(id.ToString(), out var cached)) return null;
+            if (string.IsNullOrWhiteSpace(cached.Path) || !File.Exists(cached.Path)) return null;
+            if (!Enum.TryParse<ToolResolutionOrigin>(cached.Origin, true, out var origin))
+                origin = ToolResolutionOrigin.Custom;
+            return new ToolContext(cached.Path,
+                string.IsNullOrWhiteSpace(cached.Version) ? "Available" : cached.Version,
+                origin, cached.PathEntries ?? [], cached.PrefixArguments);
+        }
+    }
+
+    public void SetCachedContext(SourceId id, ToolContext? context)
+    {
+        lock (_sync)
+        {
+            if (context is null) _data.CachedTools.Remove(id.ToString());
+            else _data.CachedTools[id.ToString()] = new CachedToolData
+            {
+                Path = context.ExecutablePath,
+                Version = context.Version,
+                Origin = context.Origin.ToString(),
+                PathEntries = context.PathEntries.ToList(),
+                PrefixArguments = context.PrefixArguments?.ToList(),
+            };
+            SaveLocked();
+        }
+    }
+
+    public IReadOnlySet<string> GetIgnoredUpdates()
+    {
+        lock (_sync) return _data.IgnoredUpdates.ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
+    public void SetUpdateIgnored(string key, bool ignored)
+    {
+        lock (_sync)
+        {
+            _data.IgnoredUpdates.RemoveAll(x => x.Equals(key, StringComparison.OrdinalIgnoreCase));
+            if (ignored) _data.IgnoredUpdates.Add(key);
+            _data.IgnoredUpdates.Sort(StringComparer.OrdinalIgnoreCase);
+            SaveLocked();
+        }
+    }
+
     private void Load(string? legacySettingsPath)
     {
         try
@@ -84,9 +135,11 @@ public sealed class SettingsService : ISettingsService
 
     private void Normalize()
     {
-        _data.Version = 3;
+        _data.Version = 4;
         _data.DisabledSources ??= [];
         _data.ExecutableOverrides ??= new(StringComparer.OrdinalIgnoreCase);
+        _data.CachedTools ??= new(StringComparer.OrdinalIgnoreCase);
+        _data.IgnoredUpdates ??= [];
     }
 
     private void SaveLocked()
@@ -94,7 +147,7 @@ public sealed class SettingsService : ISettingsService
         var directory = Path.GetDirectoryName(_settingsPath)!;
         Directory.CreateDirectory(directory);
         var temporary = _settingsPath + ".tmp";
-        _data.Version = 3;
+        _data.Version = 4;
         File.WriteAllText(temporary, JsonSerializer.Serialize(_data, JsonOptions));
         File.Move(temporary, _settingsPath, true);
         LoadIssue = null;
@@ -121,9 +174,19 @@ public sealed class SettingsService : ISettingsService
 
     private sealed class SettingsData
     {
-        public int Version { get; set; } = 3;
+        public int Version { get; set; } = 4;
         public List<string> DisabledSources { get; set; } = [];
         public Dictionary<string, string> ExecutableOverrides { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, CachedToolData> CachedTools { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        public List<string> IgnoredUpdates { get; set; } = [];
+    }
+    private sealed class CachedToolData
+    {
+        public string? Path { get; set; }
+        public string? Version { get; set; }
+        public string? Origin { get; set; }
+        public List<string>? PathEntries { get; set; }
+        public List<string>? PrefixArguments { get; set; }
     }
     private sealed class LegacySettingsData { public List<string>? DisabledSources { get; set; } }
 }

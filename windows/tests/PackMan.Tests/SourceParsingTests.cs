@@ -125,6 +125,58 @@ public sealed class SourceParsingTests
         Assert.Contains("ripgrep", invocation.Arguments);
     }
 
+    [Fact]
+    public void DotnetToolListParsesTableAndFlagsBadRows()
+    {
+        const string output = "Package Id      Version      Commands\n" +
+                              "--------------------------------------\n" +
+                              "dotnet-ef       8.0.0        dotnet-ef\n" +
+                              "badrow\n";
+        var result = DotnetToolListParser.Parse(output);
+        Assert.Single(result.Tools);
+        Assert.Equal("dotnet-ef", result.Tools[0].Id);
+        Assert.Equal("8.0.0", result.Tools[0].Version);
+        Assert.Single(result.Issues);
+    }
+
+    [Fact]
+    public async Task DotnetFindsUpdatesFromNuGetIndexAndPinsTarget()
+    {
+        var runner = new StubRunner();
+        runner.Enqueue(new(0, "Package Id      Version    Commands\n" +
+                              "-----------------------------------\n" +
+                              "newer-local     9.0.0      newer\n" +
+                              "old-tool        1.0.0      old\n", ""));
+        runner.Enqueue(new(0, "updated", ""));
+        var source = new DotnetSource(new StubResolver(), runner,
+            StubHttpHandler.JsonClient("{\"versions\":[\"1.0.0\",\"1.1.0\",\"2.0.0-preview.1\"]}"));
+        var context = new ToolContext("dotnet.exe", "8", ToolResolutionOrigin.Custom, []);
+        var report = await source.ScanAsync(context);
+        var update = Assert.Single(report.Updates);
+        Assert.Equal("old-tool", update.Id);
+        Assert.Equal("1.1.0", update.AvailableVersion);
+        await source.UpdateAsync(new("old-tool", "old-tool", "1.1.0"), context);
+        var invocation = runner.Invocations.Last();
+        Assert.Contains("update", invocation.Arguments);
+        Assert.Contains("old-tool", invocation.Arguments);
+        Assert.Contains("1.1.0", invocation.Arguments);
+    }
+
+    [Fact]
+    public async Task PipxCapabilityIsProbedOncePerSession()
+    {
+        var runner = new StubRunner();
+        runner.Enqueue(new(0, "--outdated --output", ""));
+        runner.Enqueue(new(0, "", ""));
+        runner.Enqueue(new(0, "", ""));
+        var source = new PipxSource(new StubResolver(), runner, new HttpClient(new NeverCalledHandler()));
+        var context = new ToolContext("pipx.exe", "1.16", ToolResolutionOrigin.Custom, []);
+        await source.ScanAsync(context);
+        await source.ScanAsync(context);
+        Assert.Equal(3, runner.Invocations.Count);
+        Assert.Contains("--outdated", runner.Invocations[^1].Arguments);
+    }
+
     private sealed class NeverCalledHandler : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>

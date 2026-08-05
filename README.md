@@ -28,6 +28,7 @@ Pick which sources to include, hit **Scan**, select the packages you want, and c
 - **npm** (global packages)
 - **pip** (Python packages)
 - **pipx** (isolated Python CLI tools)
+- **.NET Tools** (dotnet global tools, checked against nuget.org)
 
 ## Download
 
@@ -43,7 +44,7 @@ The app is ad-hoc signed and cannot be notarized because this project does not u
 
 Grab the latest `PackMan-Windows-x64.zip` from the [Releases](https://github.com/dklasens/PackMan/releases) page. Extract it, then run `PackMan.exe`. The app is self-contained, so no installer or .NET runtime is required.
 
-> Requires Windows 10/11 (x64). PackMan starts normally and requests administrator approval only when you explicitly retry an update with elevation. Optional sources can be installed separately: [Chocolatey](https://chocolatey.org/install), [Scoop](https://scoop.sh/), Node.js/npm, Python/pip, and pipx.
+> Requires Windows 10/11 (x64). PackMan starts normally and requests administrator approval when an update needs it: Chocolatey upgrades always run elevated, and other sources can be retried with elevation from the context menu. Updates you hide with **Ignore** can be managed in the Sources window. Optional sources can be installed separately: [Chocolatey](https://chocolatey.org/install), [Scoop](https://scoop.sh/), Node.js/npm, Python/pip, pipx, and the [.NET SDK](https://dotnet.microsoft.com/download).
 
 ## Building from source
 

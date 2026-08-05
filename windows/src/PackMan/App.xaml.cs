@@ -29,6 +29,7 @@ public partial class App : Application
                 services.AddSingleton<IPackageSource, NpmSource>();
                 services.AddSingleton<IPackageSource, PipSource>();
                 services.AddSingleton<IPackageSource, PipxSource>();
+                services.AddSingleton<IPackageSource, DotnetSource>();
             }
             services.AddSingleton<MainViewModel>();
             services.AddSingleton<MainWindow>();

@@ -20,7 +20,8 @@
                            Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,3,0,0" />
             </StackPanel>
             <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
-                <ItemsControl ItemsSource="{Binding SourceOptions}">
+                <StackPanel>
+                    <ItemsControl ItemsSource="{Binding SourceOptions}">
                     <ItemsControl.ItemTemplate>
                         <DataTemplate>
                             <Border Padding="18,13" BorderThickness="0,1,0,0" BorderBrush="#18000000">
@@ -53,6 +54,27 @@
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
+                    <Border Padding="18,13" BorderThickness="0,1,0,0" BorderBrush="#18000000"
+                            Visibility="{Binding HasIgnoredUpdates, Converter={StaticResource BoolToVis}}">
+                        <StackPanel>
+                            <TextBlock Text="Ignored Updates" FontWeight="SemiBold" Margin="0,4,0,3" />
+                            <TextBlock Text="Hidden updates. Removing a rule lets the update appear again after the next scan."
+                                       TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,0,0,8" />
+                            <ItemsControl ItemsSource="{Binding IgnoredUpdates}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <DockPanel Margin="0,2">
+                                            <ui:Button DockPanel.Dock="Right" Content="Stop Ignoring" Padding="10,2"
+                                                       Command="{Binding DataContext.RemoveIgnoredCommand, ElementName=Root}"
+                                                       CommandParameter="{Binding}" />
+                                            <TextBlock Text="{Binding}" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" />
+                                        </DockPanel>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
             </ScrollViewer>
             <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="16,10">
                 <ui:Button Content="Done" IsDefault="True" Click="Done_Click" Padding="18,6" />
