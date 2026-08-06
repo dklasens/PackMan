@@ -57,6 +57,37 @@ public sealed class ViewModelTests
         Assert.Equal(UpdateStatus.Failed, package.Status);
         Assert.True(package.IsSelected);
         Assert.True(package.CanRetryElevated);
+        Assert.Contains(vm.LogEntries, entry =>
+            entry.Message.Contains("Retry as administrator", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task InstallerCancellationDoesNotStopRemainingUpdates()
+    {
+        var attempted = new List<string>();
+        var report = new SourceScanReport([
+            new("cancelled", "cancelled", "1", "2"),
+            new("successful", "successful", "1", "2")], []);
+        var source = new StubSource(SourceId.Winget, report, request =>
+        {
+            attempted.Add(request.PackageId);
+            return request.PackageId == "cancelled"
+                ? Task.FromException(new PackageUpdateCanceledException("The installer was cancelled by the user."))
+                : Task.CompletedTask;
+        });
+        var vm = new MainViewModel([source], new MemorySettings());
+        vm.ScanOrCancelCommand.Execute(null);
+        await WaitUntilIdle(vm);
+
+        vm.UpdateSelectedCommand.Execute(null);
+        await WaitUntilIdle(vm);
+
+        Assert.Equal(["cancelled", "successful"], attempted);
+        var package = Assert.Single(vm.Packages);
+        Assert.Equal("cancelled", package.PackageId);
+        Assert.Equal(UpdateStatus.Cancelled, package.Status);
+        Assert.Equal(1, vm.UpdateSummary?.Updated);
+        Assert.Equal(1, vm.UpdateSummary?.Cancelled);
     }
 
     [Fact]

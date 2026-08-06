@@ -29,11 +29,11 @@ public sealed class ElevationBroker : IElevationBroker, IDisposable
         await session.Gate.WaitAsync(cancellationToken);
         try
         {
-            await WriteAsync(session.Writer, session.WriteLock,
+            await WriteAsync(session.Pipe, session.WriteLock,
                 new BrokerMessage("run", session.Token, Invocation: invocation), cancellationToken);
             using var registration = cancellationToken.Register(() =>
             {
-                try { WriteAsync(session.Writer, session.WriteLock, new BrokerMessage("cancel", session.Token), CancellationToken.None).GetAwaiter().GetResult(); }
+                try { WriteAsync(session.Pipe, session.WriteLock, new BrokerMessage("cancel", session.Token), CancellationToken.None).GetAwaiter().GetResult(); }
                 catch { }
             });
             while (await session.Reader.ReadLineAsync(CancellationToken.None) is { } line)
@@ -118,48 +118,89 @@ public sealed class ElevationBroker : IElevationBroker, IDisposable
     public static async Task<int> RunHelperAsync(IReadOnlyList<string> args)
     {
         if (!IsHelper(args)) return 2;
+        try
+        {
+            return await RunHelperCoreAsync(args);
+        }
+        catch (Exception ex)
+        {
+            LogHelperFailure(ex);
+            return 1;
+        }
+    }
+
+    internal static void LogHelperFailure(Exception ex)
+    {
+        try
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "PackMan");
+            Directory.CreateDirectory(directory);
+            File.AppendAllText(Path.Combine(directory, "helper-error.log"),
+                $"[{DateTimeOffset.Now:O}] {ex}{Environment.NewLine}");
+        }
+        catch { }
+    }
+
+    private static async Task<int> RunHelperCoreAsync(IReadOnlyList<string> args)
+    {
         var pipeName = args[1];
         var expectedToken = args[2];
+        // The server retains CurrentUserOnly so other Windows users cannot connect. Do not use
+        // CurrentUserOnly on this client: on Windows its owner check also requires the server and
+        // client to have the same elevation level, while this helper is intentionally elevated.
         await using var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut,
-            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            PipeOptions.Asynchronous);
         await client.ConnectAsync(15_000);
         using var reader = new StreamReader(client, Encoding.UTF8, false, 1024, leaveOpen: true);
-        using var writer = new StreamWriter(client, Encoding.UTF8, 1024, leaveOpen: true) { AutoFlush = true };
-        var writeLock = new SemaphoreSlim(1, 1);
+        using var writeLock = new SemaphoreSlim(1, 1);
         var progress = new DelegateProgress<ProcessOutputEvent>(item =>
-            WriteAsync(writer, writeLock, new BrokerMessage("output", expectedToken, Output: item), CancellationToken.None)
+            WriteAsync(client, writeLock, new BrokerMessage("output", expectedToken, Output: item), CancellationToken.None)
                 .GetAwaiter().GetResult());
 
+        // Keep exactly one read pending for the lifetime of the pipe. Starting a new idle read
+        // after a command won the WhenAny race used to overlap the still-pending control read and
+        // terminate the helper with "The stream is currently in use" after its first command.
+        var readTask = reader.ReadLineAsync();
+        Task<BrokerMessage>? runTask = null;
+        CancellationTokenSource? runCts = null;
         while (true)
         {
-            string? line;
-            using (var idle = new CancellationTokenSource(HelperIdleTimeout))
+            if (runTask is null)
             {
-                try { line = await reader.ReadLineAsync(idle.Token); }
-                catch (OperationCanceledException) { return 0; }
-            }
-            if (line is null) return 0;
-            var request = JsonSerializer.Deserialize<BrokerMessage>(line, JsonOptions);
-            if (request?.Type != "run" || request.Token != expectedToken || request.Invocation is null) continue;
+                string? line;
+                try { line = await readTask.WaitAsync(HelperIdleTimeout); }
+                catch (TimeoutException) { return 0; }
+                if (line is null) return 0;
+                readTask = reader.ReadLineAsync();
 
-            using var cts = new CancellationTokenSource();
-            var runTask = RunAndRespondAsync(request.Invocation, progress, expectedToken, cts);
-            while (!runTask.IsCompleted)
+                var request = JsonSerializer.Deserialize<BrokerMessage>(line, JsonOptions);
+                if (request?.Type != "run" || request.Token != expectedToken || request.Invocation is null) continue;
+
+                runCts = new CancellationTokenSource();
+                runTask = RunAndRespondAsync(request.Invocation, progress, expectedToken, runCts);
+                continue;
+            }
+
+            var completed = await Task.WhenAny(runTask, readTask);
+            if (completed == readTask)
             {
-                var readTask = reader.ReadLineAsync();
-                var completed = await Task.WhenAny(runTask, readTask);
-                if (completed == runTask) break;
                 var controlLine = await readTask;
                 if (controlLine is null)
                 {
-                    cts.Cancel();
+                    runCts!.Cancel();
                     try { await runTask; } catch { }
                     return 0;
                 }
+                readTask = reader.ReadLineAsync();
                 var control = JsonSerializer.Deserialize<BrokerMessage>(controlLine, JsonOptions);
-                if (control?.Type == "cancel" && control.Token == expectedToken) cts.Cancel();
+                if (control?.Type == "cancel" && control.Token == expectedToken) runCts!.Cancel();
+                continue;
             }
-            await WriteAsync(writer, writeLock, await runTask, CancellationToken.None);
+
+            await WriteAsync(client, writeLock, await runTask, CancellationToken.None);
+            runCts!.Dispose();
+            runCts = null;
+            runTask = null;
         }
     }
 
@@ -175,11 +216,15 @@ public sealed class ElevationBroker : IElevationBroker, IDisposable
         catch (Exception ex) { return new("error", token, Error: ex.Message); }
     }
 
-    private static async Task WriteAsync(StreamWriter writer, SemaphoreSlim writeLock,
+    private static async Task WriteAsync(Stream stream, SemaphoreSlim writeLock,
         BrokerMessage message, CancellationToken cancellationToken)
     {
         await writeLock.WaitAsync(cancellationToken);
-        try { await writer.WriteLineAsync(JsonSerializer.Serialize(message, JsonOptions)); }
+        try
+        {
+            var payload = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message, JsonOptions) + "\n");
+            await stream.WriteAsync(payload, cancellationToken);
+        }
         finally { writeLock.Release(); }
     }
 
@@ -191,20 +236,17 @@ public sealed class ElevationBroker : IElevationBroker, IDisposable
             Pipe = pipe;
             Token = token;
             Reader = new StreamReader(pipe, Encoding.UTF8, false, 1024, leaveOpen: true);
-            Writer = new StreamWriter(pipe, Encoding.UTF8, 1024, leaveOpen: true) { AutoFlush = true };
         }
 
         public Process Helper { get; }
         public NamedPipeServerStream Pipe { get; }
         public string Token { get; }
         public StreamReader Reader { get; }
-        public StreamWriter Writer { get; }
         public SemaphoreSlim Gate { get; } = new(1, 1);
         public SemaphoreSlim WriteLock { get; } = new(1, 1);
 
         public void Dispose()
         {
-            try { Writer.Dispose(); } catch { }
             try { Reader.Dispose(); } catch { }
             try { Pipe.Dispose(); } catch { }
             Helper.Dispose();

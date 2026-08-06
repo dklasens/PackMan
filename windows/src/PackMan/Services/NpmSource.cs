@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 
 namespace PackMan.Services;
 
@@ -41,7 +42,12 @@ public sealed class NpmSource(IToolResolver resolver, IProcessRunner runner) : P
         var result = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
             Arguments(context, "outdated", "-g", "--json"), context.Environment, TimeSpan.FromMinutes(3)),
             cancellationToken: cancellationToken);
-        if (result.ExitCode is not (0 or 1)) throw SourceSupport.CommandFailure("npm outdated", result);
+        if (result.ExitCode is not (0 or 1))
+        {
+            if (await IsMissingGlobalPrefixAsync(result, context, cancellationToken))
+                return SourceScanReport.Empty;
+            throw SourceSupport.CommandFailure("npm outdated", result);
+        }
         if (string.IsNullOrWhiteSpace(result.StdOut)) return SourceScanReport.Empty;
         Dictionary<string, NpmEntry> entries;
         try { entries = JsonSerializer.Deserialize<Dictionary<string, NpmEntry>>(result.StdOut) ?? []; }
@@ -65,6 +71,42 @@ public sealed class NpmSource(IToolResolver resolver, IProcessRunner runner) : P
             Arguments(context, "install", "-g", $"{request.PackageId}@{request.TargetVersion}"),
             context.Environment, TimeSpan.FromMinutes(15), request.Elevated), output, cancellationToken);
         if (!result.Success) throw SourceSupport.CommandFailure("npm install", result);
+    }
+
+    private static readonly Regex ErrorPathPattern = new(
+        @"(?im)^npm (?:error|err!) path (?<path>[^\r\n]+)$", RegexOptions.Compiled);
+
+    private async Task<bool> IsMissingGlobalPrefixAsync(ProcessResult failure, ToolContext context,
+        CancellationToken cancellationToken)
+    {
+        var error = $"{failure.StdOut}\n{failure.StdErr}";
+        if (failure.ExitCode != -4058
+            || !error.Contains("ENOENT", StringComparison.OrdinalIgnoreCase)
+            || !error.Contains("lstat", StringComparison.OrdinalIgnoreCase)) return false;
+
+        var pathMatch = ErrorPathPattern.Match(error);
+        if (!pathMatch.Success) return false;
+
+        var prefixResult = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
+            Arguments(context, "prefix", "-g"), context.Environment, TimeSpan.FromSeconds(30)),
+            cancellationToken: cancellationToken);
+        if (!prefixResult.Success) return false;
+
+        var prefix = prefixResult.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .LastOrDefault()?.Trim();
+        var missingPath = pathMatch.Groups["path"].Value.Trim();
+        if (string.IsNullOrWhiteSpace(prefix)) return false;
+        try
+        {
+            var normalizedPrefix = Path.TrimEndingDirectorySeparator(Path.GetFullPath(prefix));
+            var normalizedMissing = Path.TrimEndingDirectorySeparator(Path.GetFullPath(missingPath));
+            return string.Equals(normalizedPrefix, normalizedMissing, StringComparison.OrdinalIgnoreCase)
+                && !Directory.Exists(normalizedPrefix);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
     }
 
     private sealed class NpmEntry

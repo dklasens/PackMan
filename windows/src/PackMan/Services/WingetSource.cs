@@ -4,6 +4,8 @@ namespace PackMan.Services;
 
 public sealed class WingetSource(IToolResolver resolver, IProcessRunner runner) : PackageSourceBase(resolver, runner)
 {
+    private const int InstallCancelledByUser = unchecked((int)0x8A15010C);
+
     public override SourceDescriptor Descriptor { get; } = new(
         SourceId.Winget, "WinGet", ToolId.Winget, "winget",
         [Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -39,6 +41,8 @@ public sealed class WingetSource(IToolResolver resolver, IProcessRunner runner) 
             Arguments(context, "upgrade", "--id", request.PackageId, "--exact", "--version", request.TargetVersion,
                 "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"),
             context.Environment, TimeSpan.FromMinutes(15), request.Elevated), output, cancellationToken);
+        if (result.ExitCode == InstallCancelledByUser)
+            throw new PackageUpdateCanceledException("The installer was cancelled by the user.");
         if (!result.Success) throw SourceSupport.CommandFailure("winget upgrade", result);
     }
 }

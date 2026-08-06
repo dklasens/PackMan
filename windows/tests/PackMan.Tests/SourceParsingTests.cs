@@ -84,17 +84,99 @@ public sealed class SourceParsingTests
     }
 
     [Fact]
+    public async Task NpmTreatsMissingEmptyGlobalPrefixAsNoUpdates()
+    {
+        const string missingPrefix = @"Z:\PackMan-tests\missing-npm-prefix";
+        var runner = new StubRunner();
+        runner.Enqueue(new(-4058, "", $"npm error code ENOENT\nnpm error syscall lstat\nnpm error path {missingPrefix}"));
+        runner.Enqueue(new(0, missingPrefix + "\n", ""));
+        var source = new NpmSource(new StubResolver(), runner);
+        var context = new ToolContext("npm.cmd", "11", ToolResolutionOrigin.Custom, []);
+
+        var report = await source.ScanAsync(context);
+
+        Assert.Empty(report.Updates);
+        Assert.Empty(report.Issues);
+        Assert.Contains("prefix", runner.Invocations.Last().Arguments);
+        Assert.Contains("-g", runner.Invocations.Last().Arguments);
+    }
+
+    [Fact]
     public async Task PipParsesStructuredOutputAndPinsTarget()
     {
         var runner = new StubRunner();
         runner.Enqueue(new(0, "[{\"name\":\"ruff\",\"version\":\"0.9\",\"latest_version\":\"0.11\"}]", ""));
+        runner.Enqueue(new(0, "[]", ""));
         runner.Enqueue(new(0, "ok", ""));
         var source = new PipSource(new StubResolver(), runner);
         var context = new ToolContext("python.exe", "pip 25", ToolResolutionOrigin.Custom, [], ["-m", "pip"]);
         var report = await source.ScanAsync(context);
         Assert.Equal("ruff", Assert.Single(report.Updates).Id);
         await source.UpdateAsync(new("ruff", "ruff", "0.11"), context);
+        Assert.Contains("-c", runner.Invocations[^2].Arguments);
         Assert.Contains("ruff==0.11", runner.Invocations.Last().Arguments);
+    }
+
+    [Fact]
+    public async Task PipPinsInstalledDependentsInUpdateTransaction()
+    {
+        var runner = new StubRunner();
+        runner.Enqueue(new(0, "[{\"name\":\"streamlit\",\"version\":\"1.61.1\"}]", ""));
+        runner.Enqueue(new(0, "ok", ""));
+        var source = new PipSource(new StubResolver(), runner);
+        var context = new ToolContext("py.exe", "pip 26", ToolResolutionOrigin.Custom, [], ["-3", "-m", "pip"]);
+
+        await source.UpdateAsync(new("starlette", "starlette", "1.4.1"), context);
+
+        Assert.Equal(["-3", "-c"], runner.Invocations[0].Arguments.Take(2));
+        Assert.Contains("starlette==1.4.1", runner.Invocations[1].Arguments);
+        Assert.Contains("streamlit==1.61.1", runner.Invocations[1].Arguments);
+    }
+
+    [Fact]
+    public async Task PipDoesNotInstallWhenDependencyInspectionFails()
+    {
+        var runner = new StubRunner();
+        runner.Enqueue(new(1, "", "metadata unavailable"));
+        var source = new PipSource(new StubResolver(), runner);
+        var context = new ToolContext("python.exe", "pip 26", ToolResolutionOrigin.Custom, [], ["-m", "pip"]);
+
+        var error = await Assert.ThrowsAsync<SourceException>(() =>
+            source.UpdateAsync(new("starlette", "starlette", "1.4.1"), context));
+
+        Assert.Contains("update was not attempted", error.Message);
+        Assert.Single(runner.Invocations);
+    }
+
+    [Fact]
+    public async Task PipDoesNotInstallWithInvalidDependencyMetadata()
+    {
+        var runner = new StubRunner();
+        runner.Enqueue(new(0, "[{\"name\":\"--index-url\",\"version\":\"1.0\"}]", ""));
+        var source = new PipSource(new StubResolver(), runner);
+        var context = new ToolContext("python.exe", "pip 26", ToolResolutionOrigin.Custom, [], ["-m", "pip"]);
+
+        var error = await Assert.ThrowsAsync<SourceException>(() =>
+            source.UpdateAsync(new("starlette", "starlette", "1.4.1"), context));
+
+        Assert.Contains("invalid name or version", error.Message);
+        Assert.Single(runner.Invocations);
+    }
+
+    [Fact]
+    public async Task PipExplainsDependencyResolutionConflict()
+    {
+        var runner = new StubRunner();
+        runner.Enqueue(new(0, "[{\"name\":\"streamlit\",\"version\":\"1.61.1\"}]", ""));
+        runner.Enqueue(new(1, "", "ERROR: ResolutionImpossible"));
+        var source = new PipSource(new StubResolver(), runner);
+        var context = new ToolContext("python.exe", "pip 26", ToolResolutionOrigin.Custom, [], ["-m", "pip"]);
+
+        var error = await Assert.ThrowsAsync<SourceException>(() =>
+            source.UpdateAsync(new("starlette", "starlette", "1.4.1"), context));
+
+        Assert.Contains("streamlit 1.61.1", error.Message);
+        Assert.Contains("No packages were changed", error.Message);
     }
 
     [Fact]
@@ -126,6 +208,20 @@ public sealed class SourceParsingTests
     }
 
     [Fact]
+    public async Task WingetReportsInstallerCancellationWithoutACommandFailure()
+    {
+        var runner = new StubRunner();
+        runner.Enqueue(new(unchecked((int)0x8A15010C), "You cancelled the installation.", ""));
+        var source = new WingetSource(new StubResolver(), runner);
+        var context = new ToolContext("winget.exe", "1.29", ToolResolutionOrigin.Custom, []);
+
+        var error = await Assert.ThrowsAsync<PackageUpdateCanceledException>(() =>
+            source.UpdateAsync(new("AntibodySoftware.WizTree", "WizTree", "4.32"), context));
+
+        Assert.Contains("cancelled", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void DotnetToolListParsesTableAndFlagsBadRows()
     {
         const string output = "Package Id      Version      Commands\n" +
@@ -137,6 +233,22 @@ public sealed class SourceParsingTests
         Assert.Equal("dotnet-ef", result.Tools[0].Id);
         Assert.Equal("8.0.0", result.Tools[0].Version);
         Assert.Single(result.Issues);
+    }
+
+    [Fact]
+    public async Task DotnetProbeRequiresAnInstalledSdk()
+    {
+        var runner = new StubRunner();
+        runner.Enqueue(new(0, "", ""));
+        var source = new DotnetSource(new StubResolver(new ResolvedTool(
+            "dotnet.exe", ToolResolutionOrigin.Custom, [])), runner,
+            new HttpClient(new NeverCalledHandler()));
+
+        var probe = await source.ProbeAsync();
+
+        Assert.False(probe.IsAvailable);
+        Assert.Contains("no .NET SDK", probe.Issue?.Message);
+        Assert.Contains("--list-sdks", Assert.Single(runner.Invocations).Arguments);
     }
 
     [Fact]

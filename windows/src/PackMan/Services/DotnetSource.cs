@@ -13,6 +13,43 @@ public sealed class DotnetSource(IToolResolver resolver, IProcessRunner runner, 
         [Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet", "dotnet.exe")],
         "https://dotnet.microsoft.com/download");
 
+    public override async Task<SourceProbe> ProbeAsync(CancellationToken cancellationToken = default)
+    {
+        var resolution = await Resolver.ResolveAsync(Descriptor, cancellationToken);
+        if (resolution.Tool is null)
+            return SourceProbe.Unavailable(resolution.Issue ?? new SourceIssue(
+                SourceIssueKind.Unavailable, "dotnet was not found.",
+                "Install a .NET SDK or choose dotnet.exe in Sources."));
+
+        try
+        {
+            var arguments = (resolution.Tool.PrefixArguments ?? []).Concat(["--list-sdks"]).ToArray();
+            var result = await Runner.RunAsync(new ProcessInvocation(resolution.Tool.Path, arguments,
+                BuildEnvironment(resolution.Tool.PathEntries), TimeSpan.FromSeconds(15)),
+                cancellationToken: cancellationToken);
+            if (!result.Success)
+                return SourceProbe.Unavailable(new SourceIssue(SourceIssueKind.Configuration,
+                    $"dotnet was found, but its installed SDKs could not be checked: {SourceSupport.ErrorText(result)}",
+                    "Install or repair a .NET SDK, then retry."));
+
+            var sdkLine = result.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => line.Trim()).LastOrDefault();
+            if (string.IsNullOrWhiteSpace(sdkLine))
+                return SourceProbe.Unavailable(new SourceIssue(SourceIssueKind.Configuration,
+                    "The .NET runtime is installed, but no .NET SDK is installed for global tool management.",
+                    "Install a .NET SDK or disable .NET Tools in Sources."));
+
+            var version = sdkLine.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "Available";
+            return SourceProbe.Available(new ToolContext(resolution.Tool.Path, version,
+                resolution.Tool.Origin, resolution.Tool.PathEntries, resolution.Tool.PrefixArguments));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return SourceProbe.Unavailable(new SourceIssue(SourceIssueKind.Configuration,
+                $"dotnet could not be started: {ex.Message}", "Install or repair a .NET SDK, then retry."));
+        }
+    }
+
     public override async Task<SourceScanReport> ScanAsync(ToolContext context,
         IProgress<SourcePhase>? progress = null, CancellationToken cancellationToken = default)
     {

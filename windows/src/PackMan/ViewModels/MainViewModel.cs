@@ -439,6 +439,16 @@ public partial class MainViewModel : ObservableObject
                     package.Status = UpdateStatus.Verifying;
                     items.Add((package, request));
                 }
+                catch (PackageUpdateCanceledException ex)
+                {
+                    package.Status = UpdateStatus.Cancelled;
+                    package.FailureKind = UpdateFailureKind.Update;
+                    package.StatusMessage = ex.Message;
+                    package.IsSelected = true;
+                    cancelled++;
+                    OperationCompleted++;
+                    AppendLog($"Update cancelled — {ex.Message}", LogLevel.Warning, package.Name);
+                }
                 catch (OperationCanceledException)
                 {
                     package.Status = UpdateStatus.Cancelled; package.IsSelected = true; cancelled++; break;
@@ -453,6 +463,9 @@ public partial class MainViewModel : ObservableObject
                     failed++;
                     OperationCompleted++;
                     AppendLog($"Update failed — {ex.Message}", LogLevel.Error, package.Name);
+                    if (package.CanRetryElevated)
+                        AppendLog("Retry as administrator is available for this package.",
+                            LogLevel.Warning, package.Name);
                 }
             }
             if (items.Count > 0) batches.Add(new(items[0].Package.SourceRef, items[0].Package.ToolContext, items));
@@ -518,7 +531,7 @@ public partial class MainViewModel : ObservableObject
         ScanSummary = HasSourceIssues ? ScanSummaryKind.CompletedWithIssues
             : UpdateCount == 0 ? ScanSummaryKind.UpdatesCompleted : ScanSummaryKind.UpdatesAvailable;
         AppendLog(cancellationToken.IsCancellationRequested ? "Update run cancelled." : "Update run finished.",
-            failed + verificationFailed > 0 ? LogLevel.Warning : LogLevel.Success);
+            failed + verificationFailed + cancelled > 0 ? LogLevel.Warning : LogLevel.Success);
         RefreshComputed();
     }
 

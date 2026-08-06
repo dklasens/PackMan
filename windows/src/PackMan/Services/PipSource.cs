@@ -5,6 +5,28 @@ namespace PackMan.Services;
 
 public sealed class PipSource(IToolResolver resolver, IProcessRunner runner) : PackageSourceBase(resolver, runner)
 {
+    private const string FindDependentsScript = """
+        import importlib.metadata as metadata
+        import json
+        import re
+        import sys
+
+        normalize = lambda value: re.sub(r"[-_.]+", "-", value).lower()
+        target = normalize(sys.argv[1])
+        dependents = {}
+        for distribution in metadata.distributions():
+            name = distribution.metadata.get("Name")
+            version = distribution.version
+            if not name or not version or normalize(name) == target:
+                continue
+            for requirement in distribution.requires or ():
+                match = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", requirement)
+                if match and normalize(match.group(1)) == target:
+                    dependents.setdefault(normalize(name), {"name": name, "version": version})
+                    break
+        print(json.dumps(list(dependents.values()), ensure_ascii=True))
+        """;
+
     public override SourceDescriptor Descriptor { get; } = new(
         SourceId.Pip, "pip", ToolId.Python, "py",
         [Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "py.exe")],
@@ -51,10 +73,66 @@ public sealed class PipSource(IToolResolver resolver, IProcessRunner runner) : P
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
     {
         Validate(request);
+        var dependents = await FindInstalledDependentsAsync(request.PackageId, context, cancellationToken);
+        var requirements = new[] { $"{request.PackageId}=={request.TargetVersion}" }
+            .Concat(dependents.Select(item => $"{item.Name}=={item.Version}"))
+            .ToArray();
         var result = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
-            Arguments(context, "install", "--upgrade", $"{request.PackageId}=={request.TargetVersion}"),
+            Arguments(context, ["install", "--upgrade", .. requirements]),
             context.Environment, TimeSpan.FromMinutes(15), request.Elevated), output, cancellationToken);
+        if (!result.Success && result.StdErr.Contains("ResolutionImpossible", StringComparison.OrdinalIgnoreCase)
+            && dependents.Count > 0)
+        {
+            var names = string.Join(", ", dependents.Select(item => $"{item.Name} {item.Version}"));
+            throw new SourceException(SourceIssueKind.Command,
+                $"pip blocked {request.PackageId} {request.TargetVersion} because it conflicts with " +
+                $"installed dependent package(s): {names}. No packages were changed; review the command log for the constraints.");
+        }
         if (!result.Success) throw SourceSupport.CommandFailure("pip install", result);
+    }
+
+    private async Task<IReadOnlyList<PipDependent>> FindInstalledDependentsAsync(string packageId,
+        ToolContext context, CancellationToken cancellationToken)
+    {
+        var result = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
+            PythonArguments(context, "-c", FindDependentsScript, packageId),
+            context.Environment, TimeSpan.FromSeconds(30)), cancellationToken: cancellationToken);
+        if (!result.Success)
+            throw new SourceException(SourceIssueKind.Command,
+                $"Could not inspect installed pip dependencies, so the update was not attempted: {SourceSupport.ErrorText(result)}");
+        try
+        {
+            var dependents = string.IsNullOrWhiteSpace(result.StdOut)
+                ? []
+                : JsonSerializer.Deserialize<List<PipDependent>>(result.StdOut) ?? [];
+            if (dependents.Any(item => !PackageIdValidator.IsValid(item.Name)
+                || !PackageIdValidator.IsValidVersion(item.Version)))
+            {
+                throw new SourceException(SourceIssueKind.Parsing,
+                    "Installed pip dependency metadata contained an invalid name or version, so the update was not attempted.");
+            }
+            return dependents;
+        }
+        catch (JsonException ex)
+        {
+            throw new SourceException(SourceIssueKind.Parsing,
+                $"Could not read installed pip dependencies, so the update was not attempted: {ex.Message}");
+        }
+    }
+
+    private static IReadOnlyList<string> PythonArguments(ToolContext context, params string[] arguments)
+    {
+        var prefix = context.PrefixArguments ?? [];
+        var pipModuleIndex = -1;
+        for (var index = 0; index < prefix.Count - 1; index++)
+        {
+            if (prefix[index] == "-m" && prefix[index + 1].Equals("pip", StringComparison.OrdinalIgnoreCase))
+            {
+                pipModuleIndex = index;
+                break;
+            }
+        }
+        return prefix.Take(pipModuleIndex >= 0 ? pipModuleIndex : prefix.Count).Concat(arguments).ToArray();
     }
 
     private static string[] PythonPaths()
@@ -74,5 +152,11 @@ public sealed class PipSource(IToolResolver resolver, IProcessRunner runner) : P
         [JsonPropertyName("name")] public string? Name { get; set; }
         [JsonPropertyName("version")] public string? Version { get; set; }
         [JsonPropertyName("latest_version")] public string? LatestVersion { get; set; }
+    }
+
+    private sealed class PipDependent
+    {
+        [JsonPropertyName("name")] public required string Name { get; set; }
+        [JsonPropertyName("version")] public required string Version { get; set; }
     }
 }

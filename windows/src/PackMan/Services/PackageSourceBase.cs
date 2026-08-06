@@ -91,3 +91,5 @@ public sealed class SourceException(SourceIssueKind kind, string message, bool c
     public SourceIssueKind Kind { get; } = kind;
     public bool CanRetryElevated { get; } = canRetryElevated;
 }
+
+public sealed class PackageUpdateCanceledException(string message) : Exception(message);

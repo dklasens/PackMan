@@ -41,6 +41,11 @@ public partial class App : Application
     {
         if (ElevationBroker.IsHelper(e.Args))
         {
+            AppDomain.CurrentDomain.UnhandledException += (_, eventArgs) =>
+            {
+                if (eventArgs.ExceptionObject is Exception exception)
+                    ElevationBroker.LogHelperFailure(exception);
+            };
             var exitCode = await ElevationBroker.RunHelperAsync(e.Args);
             Shutdown(exitCode);
             return;
