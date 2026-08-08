@@ -34,23 +34,55 @@ public sealed class PipSource(IToolResolver resolver, IProcessRunner runner) : P
 
     public override async Task<SourceProbe> ProbeAsync(CancellationToken cancellationToken = default)
     {
-        var resolution = await Resolver.ResolveAsync(Descriptor, cancellationToken);
-        if (resolution.Tool is null)
-            resolution = await Resolver.ResolveAsync(Descriptor with { ExecutableName = "python", KnownPaths = PythonPaths() }, cancellationToken);
-        if (resolution.Tool is null)
-            return SourceProbe.Unavailable(resolution.Issue ?? new(SourceIssueKind.Unavailable, "Python with pip was not found."));
-        var prefix = Path.GetFileNameWithoutExtension(resolution.Tool.Path).Equals("py", StringComparison.OrdinalIgnoreCase)
-            ? new[] { "-3", "-m", "pip" } : new[] { "-m", "pip" };
-        var result = await Runner.RunAsync(new ProcessInvocation(resolution.Tool.Path,
-            prefix.Concat(["--version"]).ToArray(), BuildEnvironment(resolution.Tool.PathEntries), TimeSpan.FromSeconds(15)),
-            cancellationToken: cancellationToken);
-        if (!result.Success)
-            return SourceProbe.Unavailable(new SourceIssue(SourceIssueKind.Configuration,
+        var candidates = new List<ResolvedTool>();
+        var pyResolution = await Resolver.ResolveAsync(Descriptor, cancellationToken);
+        if (pyResolution.Tool is not null) candidates.Add(pyResolution.Tool);
+        var pythonResolution = await Resolver.ResolveAsync(
+            Descriptor with { ExecutableName = "python", KnownPaths = PythonPaths() }, cancellationToken);
+        if (pythonResolution.Tool is not null
+            && !candidates.Any(c => SameExecutable(c, pythonResolution.Tool))) candidates.Add(pythonResolution.Tool);
+        foreach (var path in PythonPaths())
+        {
+            var tool = new ResolvedTool(path, ToolResolutionOrigin.KnownLocation, [Path.GetDirectoryName(path)!]);
+            if (!candidates.Any(c => SameExecutable(c, tool))) candidates.Add(tool);
+        }
+        if (candidates.Count == 0)
+            return SourceProbe.Unavailable(pyResolution.Issue ?? pythonResolution.Issue
+                ?? new(SourceIssueKind.Unavailable, "Python with pip was not found."));
+
+        // A candidate can be a non-functional Microsoft Store alias stub, so keep trying the
+        // remaining interpreters before declaring the source unavailable.
+        SourceIssue? lastIssue = null;
+        foreach (var tool in candidates)
+        {
+            var prefix = Path.GetFileNameWithoutExtension(tool.Path).Equals("py", StringComparison.OrdinalIgnoreCase)
+                ? new[] { "-3", "-m", "pip" } : new[] { "-m", "pip" };
+            ProcessResult result;
+            try
+            {
+                result = await Runner.RunAsync(new ProcessInvocation(tool.Path,
+                    prefix.Concat(["--version"]).ToArray(), BuildEnvironment(tool.PathEntries), TimeSpan.FromSeconds(15)),
+                    cancellationToken: cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                lastIssue = new SourceIssue(SourceIssueKind.Configuration,
+                    $"Python at {tool.Path} could not be started: {ex.Message}",
+                    "Review the interpreter in Sources.");
+                continue;
+            }
+            if (result.Success)
+                return SourceProbe.Available(new ToolContext(tool.Path, result.StdOut.Trim(),
+                    tool.Origin, tool.PathEntries, prefix));
+            lastIssue = new SourceIssue(SourceIssueKind.Configuration,
                 $"Python was found but pip could not be used: {SourceSupport.ErrorText(result)}",
-                "Install pip for this Python interpreter or choose another interpreter."));
-        return SourceProbe.Available(new ToolContext(resolution.Tool.Path, result.StdOut.Trim(), resolution.Tool.Origin,
-            resolution.Tool.PathEntries, prefix));
+                "Install pip for this Python interpreter or choose another interpreter.");
+        }
+        return SourceProbe.Unavailable(lastIssue!);
     }
+
+    private static bool SameExecutable(ResolvedTool left, ResolvedTool right) =>
+        string.Equals(Path.GetFullPath(left.Path), Path.GetFullPath(right.Path), StringComparison.OrdinalIgnoreCase);
 
     public override async Task<SourceScanReport> ScanAsync(ToolContext context,
         IProgress<SourcePhase>? progress = null, CancellationToken cancellationToken = default)

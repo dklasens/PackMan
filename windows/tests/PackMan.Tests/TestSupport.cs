@@ -30,6 +30,12 @@ internal sealed class StubResolver(ResolvedTool? tool = null) : IToolResolver
         Task.FromResult(new ToolResolution(_tool));
 }
 
+internal sealed class DescriptorResolver(Func<SourceDescriptor, ResolvedTool?> resolve) : IToolResolver
+{
+    public Task<ToolResolution> ResolveAsync(SourceDescriptor descriptor, CancellationToken cancellationToken = default) =>
+        Task.FromResult(new ToolResolution(resolve(descriptor)));
+}
+
 internal sealed class StubElevationBroker : IElevationBroker
 {
     public Task<ProcessResult> RunAsync(ProcessInvocation invocation, IProgress<ProcessOutputEvent>? output,
@@ -66,6 +72,28 @@ internal sealed class MemorySettings : ISettingsService
     }
     public IReadOnlySet<string> GetIgnoredUpdates() => _ignored;
     public void SetUpdateIgnored(string key, bool ignored) { if (ignored) _ignored.Add(key); else _ignored.Remove(key); }
+}
+
+internal sealed class StubSourceInstaller : ISourceInstaller
+{
+    private readonly Func<SourceId, SourceInstallPlan?>? _plan;
+    private readonly Func<SourceInstallPlan, Task>? _install;
+    public StubSourceInstaller(Func<SourceId, SourceInstallPlan?>? plan = null,
+        Func<SourceInstallPlan, Task>? install = null)
+    {
+        _plan = plan;
+        _install = install;
+    }
+    public List<SourceInstallPlan> Installed { get; } = [];
+    public bool HasPlan(SourceId id) => true;
+    public Task<SourceInstallPlan?> BuildPlanAsync(SourceId id, CancellationToken cancellationToken = default) =>
+        Task.FromResult(_plan?.Invoke(id));
+    public Task InstallAsync(SourceInstallPlan plan, IProgress<ProcessOutputEvent>? output,
+        CancellationToken cancellationToken)
+    {
+        Installed.Add(plan);
+        return _install?.Invoke(plan) ?? Task.CompletedTask;
+    }
 }
 
 internal sealed class StubSource(

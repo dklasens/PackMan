@@ -6,11 +6,13 @@ namespace PackMan.ViewModels;
 
 public partial class SourceOptionViewModel : ObservableObject
 {
-    public SourceOptionViewModel(IPackageSource source, bool enabled, string? executableOverride)
+    public SourceOptionViewModel(IPackageSource source, bool enabled, string? executableOverride,
+        bool installOffered = false)
     {
         Source = source;
         _isEnabled = enabled;
         _executableOverride = executableOverride;
+        _installOffered = installOffered;
         State.Set(enabled ? SourceScanStatus.NotScanned : SourceScanStatus.Disabled);
     }
 
@@ -19,12 +21,14 @@ public partial class SourceOptionViewModel : ObservableObject
     public SourceId Id => Source.Id;
     public string Name => Source.Name;
     public SourceState State { get; } = new();
+    private readonly bool _installOffered;
     [ObservableProperty] private bool _isEnabled;
     [ObservableProperty] private ToolContext? _toolContext;
     [ObservableProperty] private SourceIssue? _probeIssue;
     [ObservableProperty] private string? _executableOverride;
 
     public bool HasIssue => IsEnabled && State.HasIssue;
+    public bool CanInstall => _installOffered && State.Status == SourceScanStatus.Unavailable;
     public string? ExecutablePath => ToolContext?.ExecutablePath ?? ExecutableOverride;
     public string VersionAndOrigin => ToolContext is null ? string.Empty : $"{ToolContext.Version} • {OriginText(ToolContext.Origin)}";
     public string StatusText => State.Status switch
@@ -32,6 +36,7 @@ public partial class SourceOptionViewModel : ObservableObject
         SourceScanStatus.Disabled => "Disabled",
         SourceScanStatus.NotScanned or SourceScanStatus.Waiting => "Not checked",
         SourceScanStatus.Probing => "Checking availability",
+        SourceScanStatus.Installing => "Installing…",
         SourceScanStatus.Scanning => State.Phase switch
         {
             SourcePhase.Refreshing => "Refreshing metadata",
@@ -55,6 +60,7 @@ public partial class SourceOptionViewModel : ObservableObject
     public void Refresh()
     {
         OnPropertyChanged(nameof(HasIssue));
+        OnPropertyChanged(nameof(CanInstall));
         OnPropertyChanged(nameof(ExecutablePath));
         OnPropertyChanged(nameof(VersionAndOrigin));
         OnPropertyChanged(nameof(StatusText));

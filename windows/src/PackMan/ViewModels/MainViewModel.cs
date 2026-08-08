@@ -14,17 +14,21 @@ public partial class MainViewModel : ObservableObject
 {
     private readonly IReadOnlyList<IPackageSource> _sources;
     private readonly ISettingsService _settings;
+    private readonly ISourceInstaller _installer;
     private CancellationTokenSource? _operationCts;
     private Task? _activeTask;
     private long _nextLogId;
     private readonly Dictionary<string, string> _lastOutput = [];
 
-    public MainViewModel(IEnumerable<IPackageSource> sources, ISettingsService settings)
+    public MainViewModel(IEnumerable<IPackageSource> sources, ISettingsService settings,
+        ISourceInstaller installer)
     {
         _sources = sources.ToList();
         _settings = settings;
+        _installer = installer;
         SourceOptions = new(_sources.Select(source => new SourceOptionViewModel(
-            source, settings.IsSourceEnabled(source.Id), settings.GetExecutableOverride(source.Descriptor.ToolId))));
+            source, settings.IsSourceEnabled(source.Id), settings.GetExecutableOverride(source.Descriptor.ToolId),
+            installer.HasPlan(source.Id))));
         foreach (var option in SourceOptions) option.PropertyChanged += OnSourceOptionChanged;
         PackagesView = CollectionViewSource.GetDefaultView(Packages);
         PackagesView.SortDescriptions.Add(new SortDescription(nameof(PackageUpdate.Source), ListSortDirection.Ascending));
@@ -46,6 +50,7 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private int _operationCompleted;
     [ObservableProperty] private int _operationTotal;
     [ObservableProperty] private string? _currentItem;
+    [ObservableProperty] private DateTimeOffset? _lastScanCompletedAt;
 
     public bool IsBusy => Operation != AppOperationKind.Idle;
     public int UpdateCount => Packages.Count(p => p.IsActionable);
@@ -61,7 +66,12 @@ public partial class MainViewModel : ObservableObject
     public string ScanButtonText => IsBusy ? (Operation == AppOperationKind.Cancelling ? "Cancelling" : "Cancel") : "Scan";
     public string UpdateButtonText => SelectedCount > 0 ? $"Update {SelectedCount}" : "Update Selected";
     public string LogButtonText => IsLogVisible ? "Hide Log" : "Show Log";
-    public string FooterText => $"{UpdateCount} update{(UpdateCount == 1 ? "" : "s")} • {SelectedCount} selected";
+    public static string VersionText =>
+        typeof(MainViewModel).Assembly.GetName().Version is { } version
+            ? $"v{version.Major}.{version.Minor}"
+            : string.Empty;
+    public string FooterText => $"{UpdateCount} update{(UpdateCount == 1 ? "" : "s")} • {SelectedCount} selected"
+        + (LastScanCompletedAt is { } scannedAt ? $" • Last scan {scannedAt:HH:mm}" : string.Empty);
     public string StatusText => ScanSummary switch
     {
         ScanSummaryKind.NotStarted => "Ready. Scan enabled sources for updates.",
@@ -191,7 +201,7 @@ public partial class MainViewModel : ObservableObject
 
     public void ReloadIgnored()
     {
-        if (IgnoredUpdates.Count > 0) return;
+        IgnoredUpdates.Clear();
         foreach (var key in _settings.GetIgnoredUpdates().OrderBy(k => k, StringComparer.OrdinalIgnoreCase))
             IgnoredUpdates.Add(key);
         OnPropertyChanged(nameof(HasIgnoredUpdates));
@@ -234,6 +244,125 @@ public partial class MainViewModel : ObservableObject
             }
         }
         catch (Exception ex) { AppendLog($"Could not save executable setting: {ex.Message}", LogLevel.Error); }
+        RefreshComputed();
+    }
+
+    internal Func<string, bool> ConfirmInstall { get; set; } = message =>
+        MessageBox.Show(message, "PackMan", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes;
+    internal Action<string> ShowInstallNotice { get; set; } = message =>
+        MessageBox.Show(message, "PackMan", MessageBoxButton.OK, MessageBoxImage.Information);
+
+    [RelayCommand]
+    private async Task InstallSource(SourceOptionViewModel? option)
+    {
+        if (option is null || IsBusy) return;
+        SourceInstallPlan? plan;
+        try { plan = await _installer.BuildPlanAsync(option.Id); }
+        catch (Exception ex)
+        {
+            AppendLog($"Could not prepare the {option.Name} installer: {ex.Message}", LogLevel.Error, option.Name);
+            return;
+        }
+        if (plan is null)
+        {
+            var message = $"{option.Name} cannot be installed automatically because a prerequisite is missing. " +
+                "Use Installation Help for manual steps.";
+            AppendLog(message, LogLevel.Warning, option.Name);
+            ShowInstallNotice(message);
+            return;
+        }
+        var confirmation = $"{plan.Summary}\n\n" +
+            (plan.RequiresElevation
+                ? "Windows will ask for administrator approval."
+                : "No administrator rights are needed.") +
+            $"\n\nInstall {plan.Title}?";
+        if (!ConfirmInstall(confirmation)) return;
+        StartOperation(ct => RunInstallAsync(option, plan, ct));
+    }
+
+    private async Task RunInstallAsync(SourceOptionViewModel option, SourceInstallPlan plan,
+        CancellationToken cancellationToken)
+    {
+        Operation = AppOperationKind.Installing;
+        CurrentItem = option.Name;
+        IsLogVisible = true;
+        AppendLog($"Installing {plan.Title} — {plan.Summary}", scope: option.Name);
+        option.State.Set(SourceScanStatus.Installing);
+        option.Refresh();
+        try
+        {
+            // The install is only offered for unavailable sources; re-probe right before running
+            // so an installation completed outside PackMan in the meantime is never repeated.
+            var existing = await option.Source.ProbeAsync(cancellationToken);
+            if (existing.IsAvailable)
+            {
+                option.ToolContext = existing.Context;
+                option.ProbeIssue = null;
+                TrySetCachedContext(option.Id, existing.Context);
+                AppendLog($"{option.Name} is already installed; nothing to do.", LogLevel.Info, option.Name);
+            }
+            else
+            {
+                var progress = new Progress<ProcessOutputEvent>(output =>
+                {
+                    var line = output.Line.Trim();
+                    if (line.Length > 0) AppendLog(line, LogLevel.Output, option.Name, output.Stream);
+                });
+                await _installer.InstallAsync(plan, progress, cancellationToken);
+                AppendLog($"{plan.Title} installer finished; verifying the installation…", LogLevel.Success, option.Name);
+                TrySetCachedContext(option.Id, null);
+                option.ToolContext = null;
+                var verify = await option.Source.ProbeAsync(cancellationToken);
+                if (!verify.IsAvailable)
+                {
+                    option.ProbeIssue = verify.Issue;
+                    option.State.Set(SourceScanStatus.Unavailable,
+                        issues: verify.Issue is null ? [] : [verify.Issue]);
+                    AppendLog($"{option.Name} was installed but could not be found afterwards. " +
+                        "A restart of PackMan may be required, or choose its executable in Sources.",
+                        LogLevel.Warning, option.Name);
+                    option.Refresh();
+                    RefreshComputed();
+                    return;
+                }
+                option.ToolContext = verify.Context;
+                option.ProbeIssue = null;
+                TrySetCachedContext(option.Id, verify.Context);
+                AppendLog($"{option.Name} is installed ({verify.Context!.Version}).", LogLevel.Success, option.Name);
+            }
+        }
+        catch (ElevationDeclinedException ex)
+        {
+            option.State.Set(SourceScanStatus.Unavailable, issues: option.ProbeIssue is null ? [] : [option.ProbeIssue]);
+            option.Refresh();
+            AppendLog(ex.Message, LogLevel.Warning, option.Name);
+            RefreshComputed();
+            return;
+        }
+        catch (OperationCanceledException)
+        {
+            option.State.Set(SourceScanStatus.Unavailable, issues: option.ProbeIssue is null ? [] : [option.ProbeIssue]);
+            option.Refresh();
+            AppendLog($"Installing {option.Name} was cancelled.", LogLevel.Warning, option.Name);
+            RefreshComputed();
+            return;
+        }
+        catch (Exception ex)
+        {
+            option.State.Set(SourceScanStatus.Unavailable, issues:
+                [new SourceIssue(SourceIssueKind.Command, $"Installation failed: {ex.Message}",
+                    "Open the log for details, or use Installation Help for manual steps.")]);
+            option.Refresh();
+            AppendLog($"Installing {option.Name} failed — {ex.Message}", LogLevel.Error, option.Name);
+            RefreshComputed();
+            return;
+        }
+
+        var outcome = await ScanOneAsync(option, cancellationToken);
+        ApplyOutcome(outcome);
+        if (ScanSummary is not (ScanSummaryKind.NotStarted or ScanSummaryKind.NoSources or ScanSummaryKind.Running))
+            DeriveScanSummary();
+        else if (UpdateCount > 0) ScanSummary = ScanSummaryKind.UpdatesAvailable;
         RefreshComputed();
     }
 
@@ -313,6 +442,7 @@ public partial class MainViewModel : ObservableObject
             AppendLog("Scan cancelled. Completed source results were preserved.", LogLevel.Warning);
         }
         else DeriveScanSummary();
+        LastScanCompletedAt = DateTimeOffset.Now;
     }
 
     private async Task<SourceOutcome> ScanOneAsync(SourceOptionViewModel option, CancellationToken cancellationToken)
@@ -435,7 +565,7 @@ public partial class MainViewModel : ObservableObject
                 var progress = new Progress<ProcessOutputEvent>(output => AppendOutput(package, output));
                 try
                 {
-                    await package.SourceRef.UpdateAsync(request, package.ToolContext, progress, cancellationToken);
+                    await UpdateWithElevationRetryAsync(package, request, progress, cancellationToken);
                     package.Status = UpdateStatus.Verifying;
                     items.Add((package, request));
                 }
@@ -448,6 +578,16 @@ public partial class MainViewModel : ObservableObject
                     cancelled++;
                     OperationCompleted++;
                     AppendLog($"Update cancelled — {ex.Message}", LogLevel.Warning, package.Name);
+                }
+                catch (ElevationDeclinedException ex)
+                {
+                    package.Status = UpdateStatus.Cancelled;
+                    package.FailureKind = UpdateFailureKind.Update;
+                    package.StatusMessage = ex.Message;
+                    package.IsSelected = true;
+                    cancelled++;
+                    OperationCompleted++;
+                    AppendLog(ex.Message, LogLevel.Warning, package.Name);
                 }
                 catch (OperationCanceledException)
                 {
@@ -535,6 +675,22 @@ public partial class MainViewModel : ObservableObject
         RefreshComputed();
     }
 
+    private async Task UpdateWithElevationRetryAsync(PackageUpdate package, UpdateRequest request,
+        IProgress<ProcessOutputEvent> progress, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await package.SourceRef.UpdateAsync(request, package.ToolContext, progress, cancellationToken);
+        }
+        catch (SourceException ex) when (!request.Elevated && ex.CanRetryElevated
+            && !cancellationToken.IsCancellationRequested)
+        {
+            AppendLog("Retrying with administrator approval…", LogLevel.Warning, package.Name);
+            await package.SourceRef.UpdateAsync(request with { Elevated = true },
+                package.ToolContext, progress, cancellationToken);
+        }
+    }
+
     private void ReplacePackages(SourceOptionViewModel option, IReadOnlyList<PackageInfo> infos)
     {
         RemovePackages(option.Id);
@@ -610,6 +766,8 @@ public partial class MainViewModel : ObservableObject
         AppendLog(line, LogLevel.Output, package.Name, output.Stream);
     }
 
+    internal void LogLaunchDiagnostic(string message) => AppendLog(message);
+
     private void AppendLog(string message, LogLevel level = LogLevel.Info, string? scope = null,
         ProcessOutputStream? stream = null)
     {
@@ -643,6 +801,7 @@ public partial class MainViewModel : ObservableObject
     partial void OnIsLogVisibleChanged(bool value) => RefreshComputed();
     partial void OnOperationCompletedChanged(int value) => OnPropertyChanged(nameof(StatusText));
     partial void OnOperationTotalChanged(int value) => OnPropertyChanged(nameof(StatusText));
+    partial void OnLastScanCompletedAtChanged(DateTimeOffset? value) => OnPropertyChanged(nameof(FooterText));
 
     private enum OutcomeKind { Report, Unavailable, Failed, Cancelled }
     private sealed record SourceOutcome(SourceOptionViewModel Option, OutcomeKind Kind,

@@ -42,6 +42,10 @@
                                                    Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
                                     </StackPanel>
                                     <StackPanel Grid.Column="2">
+                                        <ui:Button Content="Install" Command="{Binding DataContext.InstallSourceCommand, ElementName=Root}"
+                                                   CommandParameter="{Binding}" IsEnabled="{Binding DataContext.IsBusy, ElementName=Root, Converter={StaticResource InverseBool}}"
+                                                   Visibility="{Binding CanInstall, Converter={StaticResource BoolToVis}}" Margin="0,0,0,5"
+                                                   ToolTip="Download and install this package manager" />
                                         <ui:Button Content="Choose…" Command="{Binding DataContext.ChooseExecutableCommand, ElementName=Root}"
                                                    CommandParameter="{Binding}" Margin="0,0,0,5" />
                                         <ui:Button Content="Use Automatic" Command="{Binding DataContext.UseAutomaticCommand, ElementName=Root}"

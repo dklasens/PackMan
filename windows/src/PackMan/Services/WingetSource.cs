@@ -5,6 +5,7 @@ namespace PackMan.Services;
 public sealed class WingetSource(IToolResolver resolver, IProcessRunner runner) : PackageSourceBase(resolver, runner)
 {
     private const int InstallCancelledByUser = unchecked((int)0x8A15010C);
+    private const int InstallTechnologyChanged = unchecked((int)0x8A15002B);
 
     public override SourceDescriptor Descriptor { get; } = new(
         SourceId.Winget, "WinGet", ToolId.Winget, "winget",
@@ -43,6 +44,10 @@ public sealed class WingetSource(IToolResolver resolver, IProcessRunner runner) 
             context.Environment, TimeSpan.FromMinutes(15), request.Elevated), output, cancellationToken);
         if (result.ExitCode == InstallCancelledByUser)
             throw new PackageUpdateCanceledException("The installer was cancelled by the user.");
+        if (result.ExitCode == InstallTechnologyChanged)
+            throw new SourceException(SourceIssueKind.Configuration,
+                "WinGet cannot upgrade this package because the new version uses a different install technology. " +
+                "Uninstall and reinstall the package, or ignore this update.");
         if (!result.Success) throw SourceSupport.CommandFailure("winget upgrade", result);
     }
 }

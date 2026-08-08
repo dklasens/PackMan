@@ -197,6 +197,8 @@
                 <Separator />
                 <TextBlock Text="{Binding SourceIssueCount, StringFormat='{}{0} source issues'}" Margin="8,2"
                            Foreground="#FFF59E0B" Visibility="{Binding HasSourceIssues, Converter={StaticResource BoolToVis}}" />
+                <StatusBarItem HorizontalAlignment="Right"><TextBlock Text="{Binding VersionText}" FontSize="11" Margin="8,2"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" ToolTip="PackMan version" /></StatusBarItem>
                 <StatusBarItem HorizontalAlignment="Right"><TextBlock Text="{Binding FooterText}" Margin="8,2" /></StatusBarItem>
             </StatusBar>
         </Grid>

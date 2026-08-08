@@ -4,7 +4,7 @@ A desktop app that scans for outdated software across multiple package managers 
 
 PackMan has two native streams sharing one repo:
 
-- **`windows/`** — PackMan for Windows, built with WPF on .NET 8
+- **`windows/`** — PackMan for Windows, built with WPF on .NET 10
 - **`macos/`** — SwiftUI (native macOS app)
 
 ## What it does
@@ -49,9 +49,11 @@ Updates can be ignored for one version or for a package entirely from the table'
 
 ### Windows
 
-Grab the latest `PackMan-Windows-x64.zip` from the [Releases](https://github.com/dklasens/PackMan/releases) page. Extract it, then run `PackMan.exe`. The app is self-contained, so no installer or .NET runtime is required.
+Grab the latest `PackMan-Windows-x64.zip` from the [Releases](https://github.com/dklasens/PackMan/releases) page. Extract it, then run `PackMan.exe`. Requires the .NET 10 Desktop Runtime; if it is missing, Windows offers to download it on first launch.
 
-> Requires Windows 10/11 (x64). PackMan starts normally and requests administrator approval when an update needs it: Chocolatey upgrades always run elevated, and other sources can be retried with elevation from the context menu. Updates you hide with **Ignore** can be managed in the Sources window. Optional sources can be installed separately: [Chocolatey](https://chocolatey.org/install), [Scoop](https://scoop.sh/), Node.js/npm, Python/pip, pipx, and the [.NET SDK](https://dotnet.microsoft.com/download).
+> Requires Windows 10/11 (x64). PackMan scans as the current user and requests administrator approval only when an update needs it: Chocolatey upgrades always run elevated, and updates that fail with an administrator-style error are retried once with elevation automatically (one UAC prompt per batch). You can also retry any update manually as administrator from the context menu. Updates you hide with **Ignore** can be managed in the Sources window.
+>
+> Missing package managers can be installed directly from **Sources**: when a source is not available, an **Install** button downloads and installs it for you (Chocolatey and Scoop via their official scripts, pipx via your Python, Node.js/Python/.NET SDK via WinGet, WinGet itself via App Installer), prompting for elevation only when the installer requires it. The install runs only after PackMan has confirmed the manager is genuinely absent, and the source is re-checked afterwards. Optional sources can also be installed manually: [Chocolatey](https://chocolatey.org/install), [Scoop](https://scoop.sh/), Node.js/npm, Python/pip, pipx, and the [.NET SDK](https://dotnet.microsoft.com/download).
 
 ## Building from source
 
@@ -72,7 +74,7 @@ Pushing a tag such as `v1.2.3` runs both test suites (macOS and Windows), then p
 
 ### Windows
 
-Requirements: .NET 8 SDK (Windows).
+Requirements: .NET 10 SDK (Windows).
 
 ```
 cd windows
@@ -93,4 +95,4 @@ The published single-file exe lands in `windows/src/PackMan/bin/Publish/`. Exist
 ## Tech
 
 - **macOS**: SwiftUI, Swift concurrency, SwiftPM. Scans run concurrently with per-source progress, cancellation, and partial-result handling; updates are verified afterwards. `brew outdated --json=v2`, npm/pip/pipx JSON output, and the PyPI/nuget.org JSON APIs keep parsing robust.
-- **Windows**: WPF on .NET 8, [WPF UI](https://wpfui.lepo.co/) (Fluent/Mica design), CommunityToolkit.Mvvm. Scans run concurrently with per-source health, cancellation, partial-result handling, and post-update verification.
+- **Windows**: WPF on .NET 10, [WPF UI](https://wpfui.lepo.co/) (Fluent/Mica design), CommunityToolkit.Mvvm. Scans run concurrently with per-source health, cancellation, partial-result handling, and post-update verification. Updates that need administrator rights run through a single-session elevated helper with a verified client identity.

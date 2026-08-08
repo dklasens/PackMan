@@ -22,11 +22,22 @@ public sealed class ToolResolver(ISettingsService settings, IProcessRunner runne
                     $"The configured executable does not exist: {configured}", "Choose another executable or use automatic discovery."));
         }
 
+        string? storeAliasStub = null;
         foreach (var directory in PathDirectories())
         {
             var candidate = FindInDirectory(directory, descriptor.ExecutableName);
-            if (candidate is not null) return Found(candidate, ToolResolutionOrigin.Path);
+            if (candidate is null) continue;
+            // A missing Microsoft Store app leaves a 0-byte execution alias stub in WindowsApps
+            // that intercepts launches and opens the Store instead of running a tool. Keep it
+            // as a last resort only, behind any real installation on PATH.
+            if (IsStoreAliasStub(descriptor.ExecutableName, directory, candidate))
+            {
+                storeAliasStub ??= candidate;
+                continue;
+            }
+            return Found(candidate, ToolResolutionOrigin.Path);
         }
+        if (storeAliasStub is not null) return Found(storeAliasStub, ToolResolutionOrigin.Path);
         foreach (var candidate in descriptor.KnownPaths.Where(File.Exists))
             return Found(candidate, ToolResolutionOrigin.KnownLocation);
         foreach (var directory in UserDirectories(descriptor.ToolId))
@@ -81,6 +92,17 @@ public sealed class ToolResolver(ISettingsService settings, IProcessRunner runne
         return FindInDirectory(Path.GetDirectoryName(fullPath)!, Path.GetFileName(fullPath));
     }
 
+    internal static bool IsStoreAliasStub(string executableName, string directory, string path)
+    {
+        if (!executableName.Equals("python", StringComparison.OrdinalIgnoreCase)
+            && !executableName.Equals("python3", StringComparison.OrdinalIgnoreCase)) return false;
+        var aliasDirectory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Microsoft", "WindowsApps");
+        if (!string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory)), aliasDirectory,
+                StringComparison.OrdinalIgnoreCase)) return false;
+        try { return new FileInfo(path).Length == 0; } catch { return false; }
+    }
+
     private static int ExecutablePreference(string path) =>
         Path.GetExtension(path).ToLowerInvariant() switch
         {
@@ -98,6 +120,7 @@ public sealed class ToolResolver(ISettingsService settings, IProcessRunner runne
         var roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         yield return Path.Combine(home, "scoop", "shims");
         yield return Path.Combine(roaming, "Python", "Scripts");
+        foreach (var scripts in EnumeratePythonUserScripts(roaming)) yield return scripts;
         yield return Path.Combine(local, "Programs", "Python");
         if (id == ToolId.Npm)
         {
@@ -106,5 +129,16 @@ public sealed class ToolResolver(ISettingsService settings, IProcessRunner runne
             yield return Path.Combine(roaming, "nvm");
             yield return Path.Combine(home, ".volta", "bin");
         }
+    }
+
+    private static IEnumerable<string> EnumeratePythonUserScripts(string roaming)
+    {
+        // pip --user installs entry points under %APPDATA%\Python\Python3xx\Scripts (pipx lands here).
+        var root = Path.Combine(roaming, "Python");
+        if (!Directory.Exists(root)) yield break;
+        IEnumerable<string> matches;
+        try { matches = Directory.EnumerateDirectories(root, "Python3*").OrderDescending().ToList(); }
+        catch { yield break; }
+        foreach (var match in matches) yield return Path.Combine(match, "Scripts");
     }
 }

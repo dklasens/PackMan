@@ -9,7 +9,7 @@ public sealed class ViewModelTests
     [Fact]
     public async Task SuccessfulEmptyScanIsUpToDate()
     {
-        var vm = new MainViewModel([new StubSource(SourceId.Npm, SourceScanReport.Empty)], new MemorySettings());
+        var vm = new MainViewModel([new StubSource(SourceId.Npm, SourceScanReport.Empty)], new MemorySettings(), new StubSourceInstaller());
         vm.ScanOrCancelCommand.Execute(null);
         await WaitUntilIdle(vm);
         Assert.Equal(ScanSummaryKind.UpToDate, vm.ScanSummary);
@@ -20,7 +20,7 @@ public sealed class ViewModelTests
     {
         var report = new SourceScanReport([new("ruff", "ruff", "1", "2")],
             [new(SourceIssueKind.Network, "offline")]);
-        var vm = new MainViewModel([new StubSource(SourceId.Pipx, report)], new MemorySettings());
+        var vm = new MainViewModel([new StubSource(SourceId.Pipx, report)], new MemorySettings(), new StubSourceInstaller());
         vm.ScanOrCancelCommand.Execute(null);
         await WaitUntilIdle(vm);
         Assert.Equal(ScanSummaryKind.CompletedWithIssues, vm.ScanSummary);
@@ -32,7 +32,7 @@ public sealed class ViewModelTests
     public async Task VerifiedUpdateIsRemovedAndSummarized()
     {
         var report = new SourceScanReport([new("tool", "tool", "1", "2")], []);
-        var vm = new MainViewModel([new StubSource(SourceId.Npm, report)], new MemorySettings());
+        var vm = new MainViewModel([new StubSource(SourceId.Npm, report)], new MemorySettings(), new StubSourceInstaller());
         vm.ScanOrCancelCommand.Execute(null);
         await WaitUntilIdle(vm);
         vm.UpdateSelectedCommand.Execute(null);
@@ -48,7 +48,7 @@ public sealed class ViewModelTests
         var report = new SourceScanReport([new("tool", "tool", "1", "2")], []);
         var source = new StubSource(SourceId.Npm, report,
             _ => throw new SourceException(SourceIssueKind.Command, "access denied", true));
-        var vm = new MainViewModel([source], new MemorySettings());
+        var vm = new MainViewModel([source], new MemorySettings(), new StubSourceInstaller());
         vm.ScanOrCancelCommand.Execute(null);
         await WaitUntilIdle(vm);
         vm.UpdateSelectedCommand.Execute(null);
@@ -75,7 +75,7 @@ public sealed class ViewModelTests
                 ? Task.FromException(new PackageUpdateCanceledException("The installer was cancelled by the user."))
                 : Task.CompletedTask;
         });
-        var vm = new MainViewModel([source], new MemorySettings());
+        var vm = new MainViewModel([source], new MemorySettings(), new StubSourceInstaller());
         vm.ScanOrCancelCommand.Execute(null);
         await WaitUntilIdle(vm);
 
@@ -100,7 +100,7 @@ public sealed class ViewModelTests
                 probes++;
                 return Task.FromResult(SourceProbe.Available(new ToolContext("stub", "1", ToolResolutionOrigin.Custom, [])));
             });
-        var vm = new MainViewModel([source], new MemorySettings());
+        var vm = new MainViewModel([source], new MemorySettings(), new StubSourceInstaller());
         vm.ScanOrCancelCommand.Execute(null);
         await WaitUntilIdle(vm);
         vm.ScanOrCancelCommand.Execute(null);
@@ -113,7 +113,7 @@ public sealed class ViewModelTests
     {
         var report = new SourceScanReport([new("a", "a", "1", "2"), new("b", "b", "1", "2")], []);
         var settings = new MemorySettings();
-        var vm = new MainViewModel([new StubSource(SourceId.Npm, report)], settings);
+        var vm = new MainViewModel([new StubSource(SourceId.Npm, report)], settings, new StubSourceInstaller());
         vm.ScanOrCancelCommand.Execute(null);
         await WaitUntilIdle(vm);
         Assert.Equal(2, vm.Packages.Count);
@@ -134,7 +134,7 @@ public sealed class ViewModelTests
     public async Task IgnoredVersionHidesOnlyThatVersion()
     {
         var report = new SourceScanReport([new("a", "a", "1", "2")], []);
-        var vm = new MainViewModel([new StubSource(SourceId.Npm, report)], new MemorySettings());
+        var vm = new MainViewModel([new StubSource(SourceId.Npm, report)], new MemorySettings(), new StubSourceInstaller());
         vm.ScanOrCancelCommand.Execute(null);
         await WaitUntilIdle(vm);
         vm.IgnoreUpdateVersionCommand.Execute(vm.Packages.Single());
@@ -142,6 +142,214 @@ public sealed class ViewModelTests
         vm.ScanOrCancelCommand.Execute(null);
         await WaitUntilIdle(vm);
         Assert.Empty(vm.Packages);
+    }
+
+    [Fact]
+    public async Task ElevationFailureRetriesOnceElevatedAndSucceeds()
+    {
+        var attempts = new List<bool>();
+        var report = new SourceScanReport([new("tool", "tool", "1", "2")], []);
+        var source = new StubSource(SourceId.Winget, report, request =>
+        {
+            attempts.Add(request.Elevated);
+            return request.Elevated
+                ? Task.CompletedTask
+                : Task.FromException(new SourceException(SourceIssueKind.Command, "access denied", true));
+        });
+        var vm = new MainViewModel([source], new MemorySettings(), new StubSourceInstaller());
+        vm.ScanOrCancelCommand.Execute(null);
+        await WaitUntilIdle(vm);
+
+        vm.UpdateSelectedCommand.Execute(null);
+        await WaitUntilIdle(vm);
+
+        Assert.Equal([false, true], attempts);
+        Assert.Empty(vm.Packages);
+        Assert.Equal(1, vm.UpdateSummary?.Updated);
+        Assert.Contains(vm.LogEntries, entry =>
+            entry.Message.Contains("Retrying with administrator approval", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task NonRetryableFailureDoesNotRetryElevated()
+    {
+        var attempts = 0;
+        var report = new SourceScanReport([new("tool", "tool", "1", "2")], []);
+        var source = new StubSource(SourceId.Winget, report, _ =>
+        {
+            attempts++;
+            return Task.FromException(new SourceException(SourceIssueKind.Configuration,
+                "different install technology", false));
+        });
+        var vm = new MainViewModel([source], new MemorySettings(), new StubSourceInstaller());
+        vm.ScanOrCancelCommand.Execute(null);
+        await WaitUntilIdle(vm);
+
+        vm.UpdateSelectedCommand.Execute(null);
+        await WaitUntilIdle(vm);
+
+        Assert.Equal(1, attempts);
+        var package = Assert.Single(vm.Packages);
+        Assert.Equal(UpdateStatus.Failed, package.Status);
+        Assert.False(package.CanRetryElevated);
+    }
+
+    [Fact]
+    public async Task DeclinedElevationMarksPackageCancelledWithoutRetry()
+    {
+        var attempts = 0;
+        var report = new SourceScanReport([new("tool", "tool", "1", "2")], []);
+        var source = new StubSource(SourceId.Chocolatey, report, _ =>
+        {
+            attempts++;
+            return Task.FromException(new ElevationDeclinedException());
+        });
+        var vm = new MainViewModel([source], new MemorySettings(), new StubSourceInstaller());
+        vm.ScanOrCancelCommand.Execute(null);
+        await WaitUntilIdle(vm);
+
+        vm.UpdateSelectedCommand.Execute(null);
+        await WaitUntilIdle(vm);
+
+        Assert.Equal(1, attempts);
+        var package = Assert.Single(vm.Packages);
+        Assert.Equal(UpdateStatus.Cancelled, package.Status);
+        Assert.Equal(1, vm.UpdateSummary?.Cancelled);
+        Assert.Contains(vm.LogEntries, entry =>
+            entry.Message.Contains("declined", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task RepeatedlyFailingElevationStopsAfterOneRetry()
+    {
+        var attempts = 0;
+        var report = new SourceScanReport([new("tool", "tool", "1", "2")], []);
+        var source = new StubSource(SourceId.Winget, report, _ =>
+        {
+            attempts++;
+            return Task.FromException(new SourceException(SourceIssueKind.Command, "access denied", true));
+        });
+        var vm = new MainViewModel([source], new MemorySettings(), new StubSourceInstaller());
+        vm.ScanOrCancelCommand.Execute(null);
+        await WaitUntilIdle(vm);
+
+        vm.UpdateSelectedCommand.Execute(null);
+        await WaitUntilIdle(vm);
+
+        Assert.Equal(2, attempts);
+        var package = Assert.Single(vm.Packages);
+        Assert.Equal(UpdateStatus.Failed, package.Status);
+        Assert.True(package.CanRetryElevated);
+    }
+
+    [Fact]
+    public async Task InstallSourceRunsPlanAndRescans()
+    {
+        var probes = 0;
+        var report = new SourceScanReport([new("tool", "tool", "1", "2")], []);
+        var source = new StubSource(SourceId.Pipx, report, probe: () =>
+        {
+            probes++;
+            return Task.FromResult(probes < 2
+                ? SourceProbe.Unavailable(new SourceIssue(SourceIssueKind.Unavailable, "pipx was not found."))
+                : SourceProbe.Available(new ToolContext("pipx.exe", "1.7", ToolResolutionOrigin.Path, [])));
+        });
+        var plan = new SourceInstallPlan("pipx", "summary", false,
+            [new ProcessInvocation("cmd.exe", ["/d", "/c", "echo ok"])]);
+        var installer = new StubSourceInstaller(_ => plan);
+        var vm = new MainViewModel([source], new MemorySettings(), installer)
+        {
+            ConfirmInstall = _ => true,
+        };
+        var option = vm.SourceOptions.Single();
+        option.State.Set(SourceScanStatus.Unavailable);
+        option.Refresh();
+
+        vm.InstallSourceCommand.Execute(option);
+        await WaitUntilIdle(vm);
+
+        Assert.Same(plan, Assert.Single(installer.Installed));
+        Assert.Equal(2, probes);
+        Assert.Equal(SourceScanStatus.Succeeded, option.State.Status);
+        Assert.Single(vm.Packages);
+        Assert.Equal(ScanSummaryKind.UpdatesAvailable, vm.ScanSummary);
+    }
+
+    [Fact]
+    public async Task InstallSkippedWhenManagerAppearedMeanwhile()
+    {
+        var probes = 0;
+        var source = new StubSource(SourceId.Pipx, SourceScanReport.Empty, probe: () =>
+        {
+            probes++;
+            return Task.FromResult(SourceProbe.Available(new ToolContext("pipx.exe", "1.7",
+                ToolResolutionOrigin.Path, [])));
+        });
+        var plan = new SourceInstallPlan("pipx", "summary", false,
+            [new ProcessInvocation("cmd.exe", ["/d", "/c", "echo ok"])]);
+        var installer = new StubSourceInstaller(_ => plan);
+        var vm = new MainViewModel([source], new MemorySettings(), installer)
+        {
+            ConfirmInstall = _ => true,
+        };
+        var option = vm.SourceOptions.Single();
+        option.State.Set(SourceScanStatus.Unavailable);
+        option.Refresh();
+
+        vm.InstallSourceCommand.Execute(option);
+        await WaitUntilIdle(vm);
+
+        Assert.Empty(installer.Installed);
+        Assert.Equal(1, probes);
+        Assert.Contains(vm.LogEntries, entry =>
+            entry.Message.Contains("already installed", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task InstallDeclinedByUserDoesNotRun()
+    {
+        var source = new StubSource(SourceId.Chocolatey, SourceScanReport.Empty);
+        var plan = new SourceInstallPlan("Chocolatey", "summary", true,
+            [new ProcessInvocation("powershell.exe", ["-NoProfile"])]);
+        var installer = new StubSourceInstaller(_ => plan);
+        var vm = new MainViewModel([source], new MemorySettings(), installer)
+        {
+            ConfirmInstall = _ => false,
+        };
+        var option = vm.SourceOptions.Single();
+        option.State.Set(SourceScanStatus.Unavailable);
+        option.Refresh();
+
+        vm.InstallSourceCommand.Execute(option);
+        await WaitUntilIdle(vm);
+
+        Assert.Empty(installer.Installed);
+    }
+
+    [Fact]
+    public async Task DeclinedElevationDuringInstallRestoresUnavailableState()
+    {
+        var source = new StubSource(SourceId.Chocolatey, SourceScanReport.Empty,
+            probe: () => Task.FromResult(
+                SourceProbe.Unavailable(new SourceIssue(SourceIssueKind.Unavailable, "choco was not found."))));
+        var plan = new SourceInstallPlan("Chocolatey", "summary", true,
+            [new ProcessInvocation("powershell.exe", ["-NoProfile"])]);
+        var installer = new StubSourceInstaller(_ => plan,
+            _ => Task.FromException(new ElevationDeclinedException()));
+        var vm = new MainViewModel([source], new MemorySettings(), installer)
+        {
+            ConfirmInstall = _ => true,
+        };
+        var option = vm.SourceOptions.Single();
+        option.State.Set(SourceScanStatus.Unavailable);
+        option.Refresh();
+
+        vm.InstallSourceCommand.Execute(option);
+        await WaitUntilIdle(vm);
+
+        Assert.Equal(SourceScanStatus.Unavailable, option.State.Status);
+        Assert.Contains(vm.LogEntries, entry =>
+            entry.Message.Contains("declined", StringComparison.OrdinalIgnoreCase));
     }
 
     private static async Task WaitUntilIdle(MainViewModel vm)

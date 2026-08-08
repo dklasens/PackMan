@@ -11,28 +11,79 @@ public sealed class ElevationBrokerTests
     public async Task HelperProcessesMultipleCommandsOnOneConnection()
     {
         var pipeName = $"packman-{Guid.NewGuid():N}";
-        var token = Convert.ToHexString(Guid.NewGuid().ToByteArray());
-        await using var server = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1,
-            PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        var helperTask = ElevationBroker.RunHelperCoreAsync(pipeName);
+        await using var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut,
+            PipeOptions.Asynchronous);
+        await client.ConnectAsync(5_000);
+        using var reader = new StreamReader(client, Encoding.UTF8, false, 1024, leaveOpen: true);
 
-        var helperTask = ElevationBroker.RunHelperAsync(["--elevated-helper", pipeName, token]);
-        await server.WaitForConnectionAsync().WaitAsync(TimeSpan.FromSeconds(5));
-        using var reader = new StreamReader(server, Encoding.UTF8, false, 1024, leaveOpen: true);
+        Assert.Equal("first", await RunCommandAsync(client, reader, "first"));
+        Assert.Equal("second", await RunCommandAsync(client, reader, "second"));
 
-        Assert.Equal("first", await RunCommandAsync(server, reader, token, "first"));
-        Assert.Equal("second", await RunCommandAsync(server, reader, token, "second"));
-
-        server.Disconnect();
+        client.Dispose();
         Assert.Equal(0, await helperTask.WaitAsync(TimeSpan.FromSeconds(5)));
     }
 
-    private static async Task<string> RunCommandAsync(Stream stream, StreamReader reader,
-        string token, string value)
+    [Fact]
+    public void ServerPipeGrantsCurrentUserWithLowIntegrityLabel()
+    {
+        // The elevated helper's pipe must stay writable by the unelevated PackMan process:
+        // a Low mandatory label opts out of MIC no-write-up, and the DACL limits access to
+        // this Windows account. Regression guard for "Access to the path is denied" on connect.
+        var pipeName = $"packman-{Guid.NewGuid():N}";
+        using var server = ElevationBroker.CreateServerPipe(pipeName);
+        var sddl = ReadSecurityDescriptor(server.SafePipeHandle,
+            ElevationBroker.DaclSecurityInformation | ElevationBroker.LabelSecurityInformation);
+
+        var userSid = System.Security.Principal.WindowsIdentity.GetCurrent().User!.Value;
+        Assert.True(sddl.Contains($"D:(A;;FA;;;{userSid})", StringComparison.OrdinalIgnoreCase), $"SDDL was: {sddl}");
+        Assert.True(sddl.Contains("S:(ML;;NW;;;LW)", StringComparison.OrdinalIgnoreCase), $"SDDL was: {sddl}");
+    }
+
+    private static string ReadSecurityDescriptor(System.Runtime.InteropServices.SafeHandle handle, int sections)
+    {
+        const uint revision = 1;
+        GetKernelObjectSecurity(handle, sections, null, 0, out var needed);
+        var buffer = new byte[needed];
+        if (!GetKernelObjectSecurity(handle, sections, buffer, needed, out _))
+            throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+        var pinned = System.Runtime.InteropServices.GCHandle.Alloc(buffer, System.Runtime.InteropServices.GCHandleType.Pinned);
+        try
+        {
+            if (!ConvertSecurityDescriptorToStringSecurityDescriptor(pinned.AddrOfPinnedObject(),
+                    revision, sections, out var sddl, out _))
+                throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+            var text = System.Runtime.InteropServices.Marshal.PtrToStringUni(sddl);
+            System.Runtime.InteropServices.Marshal.FreeHGlobal(sddl);
+            return text ?? string.Empty;
+        }
+        finally { pinned.Free(); }
+    }
+
+    [System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool GetKernelObjectSecurity(System.Runtime.InteropServices.SafeHandle handle,
+        int securityInformation, byte[]? resultantSecurityDescriptor, uint descriptorLength, out uint returnLength);
+
+    [System.Runtime.InteropServices.DllImport("advapi32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool ConvertSecurityDescriptorToStringSecurityDescriptor(
+        System.IntPtr securityDescriptor, uint requestedStringSDRevision, int securityInformation,
+        out System.IntPtr stringSecurityDescriptor, out System.UIntPtr stringSecurityDescriptorLen);
+
+    [Theory]
+    [InlineData(new[] { "--elevated-helper", "packman-abc123" }, true)]
+    [InlineData(new[] { "--elevated-helper", "packman-abc123", "legacy-token" }, false)]
+    [InlineData(new[] { "--elevated-helper", "bad name!" }, false)]
+    [InlineData(new[] { "--other" }, false)]
+    public void HelperArgumentsAreValidated(string[] args, bool expected) =>
+        Assert.Equal(expected, ElevationBroker.IsHelper(args));
+
+    private static async Task<string> RunCommandAsync(Stream stream, StreamReader reader, string value)
     {
         var request = JsonSerializer.Serialize(new
         {
             type = "run",
-            token,
             invocation = new
             {
                 fileName = "cmd.exe",
@@ -47,7 +98,6 @@ public sealed class ElevationBrokerTests
         while (await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10)) is { } line)
         {
             using var response = JsonDocument.Parse(line);
-            if (response.RootElement.GetProperty("token").GetString() != token) continue;
             var type = response.RootElement.GetProperty("type").GetString();
             if (type == "error")
                 throw new InvalidOperationException(response.RootElement.GetProperty("error").GetString());

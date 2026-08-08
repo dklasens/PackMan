@@ -2,9 +2,12 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Microsoft.Win32.SafeHandles;
 
 namespace PackMan.Services;
 
@@ -19,6 +22,8 @@ public sealed class ElevationBroker : IElevationBroker, IDisposable
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly Regex SafePipeName = new("^[a-zA-Z0-9-]{1,80}$", RegexOptions.Compiled);
     private static readonly TimeSpan HelperIdleTimeout = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan HelperConnectTimeout = TimeSpan.FromMinutes(5);
+    private const long MaxHelperLogBytes = 256 * 1024;
     private readonly SemaphoreSlim _sessionLock = new(1, 1);
     private Session? _session;
 
@@ -30,17 +35,16 @@ public sealed class ElevationBroker : IElevationBroker, IDisposable
         try
         {
             await WriteAsync(session.Pipe, session.WriteLock,
-                new BrokerMessage("run", session.Token, Invocation: invocation), cancellationToken);
+                new BrokerMessage("run", Invocation: invocation), cancellationToken);
             using var registration = cancellationToken.Register(() =>
             {
-                try { WriteAsync(session.Pipe, session.WriteLock, new BrokerMessage("cancel", session.Token), CancellationToken.None).GetAwaiter().GetResult(); }
+                try { WriteAsync(session.Pipe, session.WriteLock, new BrokerMessage("cancel"), CancellationToken.None).GetAwaiter().GetResult(); }
                 catch { }
             });
             while (await session.Reader.ReadLineAsync(CancellationToken.None) is { } line)
             {
                 var message = JsonSerializer.Deserialize<BrokerMessage>(line, JsonOptions)
                     ?? throw new InvalidOperationException("The elevated helper returned an invalid response.");
-                if (!string.Equals(message.Token, session.Token, StringComparison.Ordinal)) continue;
                 if (message.Type == "output" && message.Output is not null) output?.Report(message.Output);
                 if (message.Type == "complete" && message.Result is not null) return message.Result;
                 if (message.Type == "cancelled") throw new OperationCanceledException(cancellationToken);
@@ -77,50 +81,77 @@ public sealed class ElevationBroker : IElevationBroker, IDisposable
     private static async Task<Session> StartSessionAsync(CancellationToken cancellationToken)
     {
         var pipeName = $"packman-{Guid.NewGuid():N}";
-        var token = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(24));
-        var server = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1,
-            PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        var executable = Environment.ProcessPath
+            ?? throw new InvalidOperationException("PackMan executable path is unavailable.");
+        var start = new ProcessStartInfo(executable)
+        {
+            UseShellExecute = true,
+            Verb = "runas",
+            WindowStyle = ProcessWindowStyle.Hidden,
+        };
+        start.ArgumentList.Add("--elevated-helper");
+        start.ArgumentList.Add(pipeName);
+        Process helper;
         try
         {
-            var executable = Environment.ProcessPath ?? throw new InvalidOperationException("PackMan executable path is unavailable.");
-            var start = new ProcessStartInfo(executable)
+            helper = Process.Start(start)
+                ?? throw new InvalidOperationException("Could not start the elevated helper.");
+        }
+        catch (Win32Exception ex) when (ex.NativeErrorCode is SourceSupport.ErrorCancelled)
+        {
+            throw new ElevationDeclinedException();
+        }
+
+        // The helper owns the pipe server and only exists after UAC approval, so poll until it
+        // has created the pipe instead of assuming it is ready.
+        var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+        try
+        {
+            var deadline = DateTime.UtcNow + HelperConnectTimeout;
+            while (true)
             {
-                UseShellExecute = true,
-                Verb = "runas",
-                WindowStyle = ProcessWindowStyle.Hidden,
-            };
-            start.ArgumentList.Add("--elevated-helper");
-            start.ArgumentList.Add(pipeName);
-            start.ArgumentList.Add(token);
-            Process helper;
-            try
-            {
-                helper = Process.Start(start) ?? throw new InvalidOperationException("Could not start the elevated helper.");
+                cancellationToken.ThrowIfCancellationRequested();
+                if (helper.HasExited)
+                    throw new SourceException(SourceIssueKind.Command,
+                        "The elevated helper stopped before accepting a connection. Retry the update.");
+                try
+                {
+                    await client.ConnectAsync(1000, cancellationToken);
+                    break;
+                }
+                catch (TimeoutException)
+                {
+                    if (DateTime.UtcNow >= deadline)
+                        throw new SourceException(SourceIssueKind.Command,
+                            "Timed out waiting for the elevated helper to start. Retry the update.");
+                }
+                catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+                {
+                    throw new SourceException(SourceIssueKind.Command,
+                        $"Windows refused the connection to the elevated helper: {ex.Message} " +
+                        "Report this if it persists; the update did not run.");
+                }
             }
-            catch (Win32Exception ex) when (ex.NativeErrorCode is 1223)
-            {
-                throw new SourceException(SourceIssueKind.Command,
-                    "Administrator approval was declined; the update did not run.", canRetryElevated: true);
-            }
-            await server.WaitForConnectionAsync(cancellationToken);
-            return new Session(helper, server, token);
+            return new Session(helper, client);
         }
         catch
         {
-            server.Dispose();
+            client.Dispose();
+            try { if (!helper.HasExited) helper.Kill(entireProcessTree: true); } catch { }
+            helper.Dispose();
             throw;
         }
     }
 
     public static bool IsHelper(IReadOnlyList<string> args) =>
-        args.Count == 3 && args[0] == "--elevated-helper" && SafePipeName.IsMatch(args[1]);
+        args.Count == 2 && args[0] == "--elevated-helper" && SafePipeName.IsMatch(args[1]);
 
     public static async Task<int> RunHelperAsync(IReadOnlyList<string> args)
     {
         if (!IsHelper(args)) return 2;
         try
         {
-            return await RunHelperCoreAsync(args);
+            return await RunHelperCoreAsync(args[1]);
         }
         catch (Exception ex)
         {
@@ -135,26 +166,30 @@ public sealed class ElevationBroker : IElevationBroker, IDisposable
         {
             var directory = Path.Combine(Path.GetTempPath(), "PackMan");
             Directory.CreateDirectory(directory);
-            File.AppendAllText(Path.Combine(directory, "helper-error.log"),
-                $"[{DateTimeOffset.Now:O}] {ex}{Environment.NewLine}");
+            var path = Path.Combine(directory, "helper-error.log");
+            if (new FileInfo(path) is { Exists: true, Length: > MaxHelperLogBytes })
+                File.WriteAllText(path, string.Empty);
+            File.AppendAllText(path, $"[{DateTimeOffset.Now:O}] {ex}{Environment.NewLine}");
         }
         catch { }
     }
 
-    private static async Task<int> RunHelperCoreAsync(IReadOnlyList<string> args)
+    internal static async Task<int> RunHelperCoreAsync(string pipeName)
     {
-        var pipeName = args[1];
-        var expectedToken = args[2];
-        // The server retains CurrentUserOnly so other Windows users cannot connect. Do not use
-        // CurrentUserOnly on this client: on Windows its owner check also requires the server and
-        // client to have the same elevation level, while this helper is intentionally elevated.
-        await using var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut,
-            PipeOptions.Asynchronous);
-        await client.ConnectAsync(15_000);
-        using var reader = new StreamReader(client, Encoding.UTF8, false, 1024, leaveOpen: true);
+        // The helper is the pipe server. The pipe is ACL'd to this Windows account and carries
+        // a Low mandatory label: without it the pipe inherits this process's High integrity and
+        // MIC no-write-up rejects the unelevated PackMan client at connect time. The client is
+        // additionally verified to be a PackMan process from this same executable.
+        await using var server = CreateServerPipe(pipeName);
+        using var connectTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        try { await server.WaitForConnectionAsync(connectTimeout.Token); }
+        catch (OperationCanceledException) { return 0; }
+        if (!IsTrustedClient(server)) return 3;
+
+        using var reader = new StreamReader(server, Encoding.UTF8, false, 1024, leaveOpen: true);
         using var writeLock = new SemaphoreSlim(1, 1);
         var progress = new DelegateProgress<ProcessOutputEvent>(item =>
-            WriteAsync(client, writeLock, new BrokerMessage("output", expectedToken, Output: item), CancellationToken.None)
+            WriteAsync(server, writeLock, new BrokerMessage("output", Output: item), CancellationToken.None)
                 .GetAwaiter().GetResult());
 
         // Keep exactly one read pending for the lifetime of the pipe. Starting a new idle read
@@ -174,10 +209,10 @@ public sealed class ElevationBroker : IElevationBroker, IDisposable
                 readTask = reader.ReadLineAsync();
 
                 var request = JsonSerializer.Deserialize<BrokerMessage>(line, JsonOptions);
-                if (request?.Type != "run" || request.Token != expectedToken || request.Invocation is null) continue;
+                if (request?.Type != "run" || request.Invocation is null) continue;
 
                 runCts = new CancellationTokenSource();
-                runTask = RunAndRespondAsync(request.Invocation, progress, expectedToken, runCts);
+                runTask = RunAndRespondAsync(request.Invocation, progress, runCts);
                 continue;
             }
 
@@ -193,27 +228,99 @@ public sealed class ElevationBroker : IElevationBroker, IDisposable
                 }
                 readTask = reader.ReadLineAsync();
                 var control = JsonSerializer.Deserialize<BrokerMessage>(controlLine, JsonOptions);
-                if (control?.Type == "cancel" && control.Token == expectedToken) runCts!.Cancel();
+                if (control?.Type == "cancel") runCts!.Cancel();
                 continue;
             }
 
-            await WriteAsync(client, writeLock, await runTask, CancellationToken.None);
+            await WriteAsync(server, writeLock, await runTask, CancellationToken.None);
             runCts!.Dispose();
             runCts = null;
             runTask = null;
         }
     }
 
+    internal static NamedPipeServerStream CreateServerPipe(string pipeName)
+    {
+        var userSid = WindowsIdentity.GetCurrent().User?.Value
+            ?? throw new InvalidOperationException("The elevated helper could not determine its user SID.");
+        var security = new PipeSecurity();
+        security.SetSecurityDescriptorSddlForm($"D:(A;;GA;;;{userSid})");
+        var server = NamedPipeServerStreamAcl.Create(pipeName, PipeDirection.InOut, 1,
+            PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 0, 0, security);
+        try
+        {
+            ApplyIntegrityLabel(server.SafePipeHandle);
+            return server;
+        }
+        catch
+        {
+            server.Dispose();
+            throw;
+        }
+    }
+
+    internal const int DaclSecurityInformation = 0x00000004;
+    internal const int LabelSecurityInformation = 0x00000010;
+
+    private static void ApplyIntegrityLabel(SafePipeHandle handle)
+    {
+        // Low mandatory label so the unelevated PackMan process can write to this elevated
+        // server (MIC no-write-up would otherwise reject the connect). Setting the DACL on the
+        // live handle needs a right the managed pipe handle does not have, so the DACL is
+        // applied at creation and only the label is set here: LABEL_SECURITY_INFORMATION does
+        // not require SeSecurityPrivilege, unlike the managed PipeSecurity SACL path.
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptor("S:(ML;;NW;;;LW)", 1, out var descriptor, out _))
+            throw new Win32Exception(Marshal.GetLastWin32Error(),
+                "Could not build the elevated helper pipe security descriptor.");
+        try
+        {
+            if (!SetKernelObjectSecurity(handle, LabelSecurityInformation, descriptor))
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "Could not secure the elevated helper pipe.");
+        }
+        finally { Marshal.FreeHGlobal(descriptor); }
+    }
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(
+        string stringSecurityDescriptor, uint stringSDRevision,
+        out IntPtr securityDescriptor, out UIntPtr securityDescriptorSize);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetKernelObjectSecurity(
+        SafeHandle handle, int securityInformation, IntPtr securityDescriptor);
+
+    internal static bool IsTrustedClient(NamedPipeServerStream server)
+    {
+        try
+        {
+            if (!GetNamedPipeClientProcessId(server.SafePipeHandle, out var clientProcessId)) return false;
+            using var client = Process.GetProcessById((int)clientProcessId);
+            var clientPath = client.MainModule?.FileName;
+            var ownPath = Environment.ProcessPath;
+            if (string.IsNullOrWhiteSpace(clientPath) || string.IsNullOrWhiteSpace(ownPath)) return false;
+            return string.Equals(Path.GetFullPath(clientPath), Path.GetFullPath(ownPath),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetNamedPipeClientProcessId(SafePipeHandle pipeHandle, out uint clientProcessId);
+
     private static async Task<BrokerMessage> RunAndRespondAsync(ProcessInvocation invocation,
-        IProgress<ProcessOutputEvent> progress, string token, CancellationTokenSource cts)
+        IProgress<ProcessOutputEvent> progress, CancellationTokenSource cts)
     {
         try
         {
             var result = await ProcessRunner.RunLocalAsync(invocation, progress, cts.Token);
-            return new("complete", token, Result: result);
+            return new("complete", Result: result);
         }
-        catch (OperationCanceledException) { return new("cancelled", token); }
-        catch (Exception ex) { return new("error", token, Error: ex.Message); }
+        catch (OperationCanceledException) { return new("cancelled"); }
+        catch (Exception ex) { return new("error", Error: ex.Message); }
     }
 
     private static async Task WriteAsync(Stream stream, SemaphoreSlim writeLock,
@@ -230,17 +337,15 @@ public sealed class ElevationBroker : IElevationBroker, IDisposable
 
     private sealed class Session : IDisposable
     {
-        public Session(Process helper, NamedPipeServerStream pipe, string token)
+        public Session(Process helper, NamedPipeClientStream pipe)
         {
             Helper = helper;
             Pipe = pipe;
-            Token = token;
             Reader = new StreamReader(pipe, Encoding.UTF8, false, 1024, leaveOpen: true);
         }
 
         public Process Helper { get; }
-        public NamedPipeServerStream Pipe { get; }
-        public string Token { get; }
+        public NamedPipeClientStream Pipe { get; }
         public StreamReader Reader { get; }
         public SemaphoreSlim Gate { get; } = new(1, 1);
         public SemaphoreSlim WriteLock { get; } = new(1, 1);
@@ -255,7 +360,6 @@ public sealed class ElevationBroker : IElevationBroker, IDisposable
 
     private sealed record BrokerMessage(
         string Type,
-        string Token,
         ProcessInvocation? Invocation = null,
         ProcessOutputEvent? Output = null,
         ProcessResult? Result = null,

@@ -49,6 +49,44 @@ public sealed class ProcessRunnerTests
             "powershell.exe", ["-NoProfile", "-Command", "Start-Sleep -Seconds 10"]), cancellationToken: cts.Token));
     }
 
+    [Fact]
+    public async Task CmdScriptReceivesSimpleArgumentsUnquoted()
+    {
+        // Scoop's .cmd shim rewrites double quotes in %* to single quotes; a simple argument
+        // must therefore arrive raw. %1 preserves any surrounding quotes, exposing them here.
+        var directory = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(),
+            "PackMan Tests " + Guid.NewGuid().ToString("N")));
+        try
+        {
+            var script = Path.Combine(directory.FullName, "echo.cmd");
+            await File.WriteAllTextAsync(script, "@echo off\r\necho %1\r\n");
+            var runner = new ProcessRunner(new StubElevationBroker());
+            var result = await runner.RunAsync(new ProcessInvocation(script, ["--version"]));
+            Assert.True(result.Success);
+            Assert.Equal("--version", result.StdOut.Trim());
+        }
+        finally
+        {
+            Directory.Delete(directory.FullName, true);
+        }
+    }
+
+    [Theory]
+    [InlineData("--version", "--version")]
+    [InlineData("plain", "plain")]
+    [InlineData("with space", "\"with space\"")]
+    [InlineData("", "\"\"")]
+    public void QuoteForCmdQuotesOnlyWhenNeeded(string value, string expected) =>
+        Assert.Equal(expected, ProcessRunner.QuoteForCmd(value));
+
+    [Theory]
+    [InlineData("a&b")]
+    [InlineData("a|b")]
+    [InlineData("a%b")]
+    [InlineData("a!b")]
+    public void QuoteForCmdRejectsUnsafeArguments(string value) =>
+        Assert.Throws<SourceException>(() => ProcessRunner.QuoteForCmd(value));
+
     private sealed class SynchronousProgress<T>(Action<T> action) : IProgress<T>
     {
         public void Report(T value) => action(value);

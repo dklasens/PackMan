@@ -1,6 +1,6 @@
+using System.Diagnostics;
 using System.Windows;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
 using PackMan.Services;
 using PackMan.ViewModels;
 
@@ -8,37 +8,14 @@ namespace PackMan;
 
 public partial class App : Application
 {
-    private static readonly IHost AppHost = Host.CreateDefaultBuilder()
-        .ConfigureServices((_, services) =>
-        {
-            services.AddSingleton<IElevationBroker, ElevationBroker>();
-            services.AddSingleton<IProcessRunner, ProcessRunner>();
-            services.AddSingleton<IToolResolver, ToolResolver>();
-            services.AddSingleton(new HttpClient { Timeout = TimeSpan.FromSeconds(20) });
-            if (UiTestEnvironment.Scenario is { } scenario)
-            {
-                services.AddSingleton<ISettingsService, UiTestSettings>();
-                services.AddSingleton<IPackageSource>(new UiTestPackageSource(scenario));
-            }
-            else
-            {
-                services.AddSingleton<ISettingsService, SettingsService>();
-                services.AddSingleton<IPackageSource, WingetSource>();
-                services.AddSingleton<IPackageSource, ChocoSource>();
-                services.AddSingleton<IPackageSource, ScoopSource>();
-                services.AddSingleton<IPackageSource, NpmSource>();
-                services.AddSingleton<IPackageSource, PipSource>();
-                services.AddSingleton<IPackageSource, PipxSource>();
-                services.AddSingleton<IPackageSource, DotnetSource>();
-            }
-            services.AddSingleton<MainViewModel>();
-            services.AddSingleton<MainWindow>();
-        }).Build();
+    private static readonly bool LaunchDiagnostics =
+        string.Equals(Environment.GetEnvironmentVariable("PACKMAN_DIAGNOSTICS"), "1", StringComparison.Ordinal);
 
-    private bool _hostStarted;
+    private ServiceProvider? _services;
 
     protected override async void OnStartup(StartupEventArgs e)
     {
+        var launchStart = Stopwatch.GetTimestamp();
         if (ElevationBroker.IsHelper(e.Args))
         {
             AppDomain.CurrentDomain.UnhandledException += (_, eventArgs) =>
@@ -50,22 +27,51 @@ public partial class App : Application
             Shutdown(exitCode);
             return;
         }
-        await AppHost.StartAsync();
-        _hostStarted = true;
+
+        var services = new ServiceCollection();
+        services.AddSingleton<IElevationBroker, ElevationBroker>();
+        services.AddSingleton<IProcessRunner, ProcessRunner>();
+        services.AddSingleton<IToolResolver, ToolResolver>();
+        services.AddSingleton<ISourceInstaller, SourceInstaller>();
+        services.AddSingleton(_ => new HttpClient { Timeout = TimeSpan.FromSeconds(20) });
+        if (UiTestEnvironment.Scenario is { } scenario)
+        {
+            services.AddSingleton<ISettingsService, UiTestSettings>();
+            services.AddSingleton<IPackageSource>(new UiTestPackageSource(scenario));
+        }
+        else
+        {
+            services.AddSingleton<ISettingsService, SettingsService>();
+            services.AddSingleton<IPackageSource, WingetSource>();
+            services.AddSingleton<IPackageSource, ChocoSource>();
+            services.AddSingleton<IPackageSource, ScoopSource>();
+            services.AddSingleton<IPackageSource, NpmSource>();
+            services.AddSingleton<IPackageSource, PipSource>();
+            services.AddSingleton<IPackageSource, PipxSource>();
+            services.AddSingleton<IPackageSource, DotnetSource>();
+        }
+        services.AddSingleton<MainViewModel>();
+        services.AddSingleton<MainWindow>();
+        _services = services.BuildServiceProvider();
+        var servicesMs = ElapsedMilliseconds(launchStart);
+
         Wpf.Ui.Appearance.ApplicationThemeManager.ApplySystemTheme();
-        var window = AppHost.Services.GetRequiredService<MainWindow>();
+        var window = _services.GetRequiredService<MainWindow>();
         MainWindow = window;
         window.Show();
         base.OnStartup(e);
+
+        if (LaunchDiagnostics && window.DataContext is MainViewModel viewModel)
+            viewModel.LogLaunchDiagnostic(
+                $"Launch: services {servicesMs} ms, window shown {ElapsedMilliseconds(launchStart)} ms.");
     }
 
-    protected override async void OnExit(ExitEventArgs e)
+    protected override void OnExit(ExitEventArgs e)
     {
-        if (_hostStarted)
-        {
-            await AppHost.StopAsync();
-            AppHost.Dispose();
-        }
+        _services?.Dispose();
         base.OnExit(e);
     }
+
+    private static long ElapsedMilliseconds(long start) =>
+        (long)((Stopwatch.GetTimestamp() - start) * 1000.0 / Stopwatch.Frequency);
 }

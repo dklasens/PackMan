@@ -102,6 +102,40 @@ public sealed class SourceParsingTests
     }
 
     [Fact]
+    public async Task NpmMissingPrefixIsDetectedWithCrlfProcessOutput()
+    {
+        // ProcessRunner rebuilds captured output with Environment.NewLine, so real runs arrive
+        // with \r\n line endings. Regression test for the \r before the path end anchor.
+        const string missingPrefix = @"Z:\PackMan-tests\missing-npm-prefix-crlf";
+        var runner = new StubRunner();
+        runner.Enqueue(new(-4058, "",
+            $"npm error code ENOENT\r\nnpm error syscall lstat\r\nnpm error path {missingPrefix}\r\nnpm error errno -4058\r\n"));
+        runner.Enqueue(new(0, missingPrefix + "\r\n", ""));
+        var source = new NpmSource(new StubResolver(), runner);
+        var context = new ToolContext("npm.cmd", "11", ToolResolutionOrigin.Custom, []);
+
+        var report = await source.ScanAsync(context);
+
+        Assert.Empty(report.Updates);
+        Assert.Empty(report.Issues);
+    }
+
+    [Fact]
+    public async Task ScoopProbeFallsBackToHelpWhenVersionIsUnsupported()
+    {
+        var runner = new StubRunner();
+        runner.Enqueue(new(1, "", "WARN  scoop: '--version' isn't a scoop command. See 'scoop help'."));
+        runner.Enqueue(new(0, "Usage: scoop <command> [<args>]", ""));
+        var source = new ScoopSource(new StubResolver(), runner);
+
+        var probe = await source.ProbeAsync();
+
+        Assert.True(probe.IsAvailable);
+        Assert.Equal("Available", probe.Context!.Version);
+        Assert.Equal("help", runner.Invocations.Last().Arguments.Last());
+    }
+
+    [Fact]
     public async Task PipParsesStructuredOutputAndPinsTarget()
     {
         var runner = new StubRunner();
@@ -219,6 +253,86 @@ public sealed class SourceParsingTests
             source.UpdateAsync(new("AntibodySoftware.WizTree", "WizTree", "4.32"), context));
 
         Assert.Contains("cancelled", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task WingetInstallTechnologyMismatchIsActionableAndNotElevationRetryable()
+    {
+        var runner = new StubRunner();
+        runner.Enqueue(new(unchecked((int)0x8A15002B), "",
+            "The install technology of the newer version specified is different from the current version installed."));
+        var source = new WingetSource(new StubResolver(), runner);
+        var context = new ToolContext("winget.exe", "1.29", ToolResolutionOrigin.Custom, []);
+
+        var error = await Assert.ThrowsAsync<SourceException>(() =>
+            source.UpdateAsync(new("Microsoft.Edge", "Microsoft Edge", "139.0"), context));
+
+        Assert.False(error.CanRetryElevated);
+        Assert.Contains("different install technology", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("ignore this update", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task WingetInstallerUacCancellationIsElevationRetryable()
+    {
+        var runner = new StubRunner();
+        runner.Enqueue(new(unchecked((int)0x8A150006), "", "Installer failed with exit code: 1223"));
+        var source = new WingetSource(new StubResolver(), runner);
+        var context = new ToolContext("winget.exe", "1.29", ToolResolutionOrigin.Custom, []);
+
+        var error = await Assert.ThrowsAsync<SourceException>(() =>
+            source.UpdateAsync(new("Bitwarden.Bitwarden", "Bitwarden", "2026.7.0"), context));
+
+        Assert.True(error.CanRetryElevated);
+    }
+
+    [Fact]
+    public async Task WingetInstallerFileNotFoundIsElevationRetryable()
+    {
+        var runner = new StubRunner();
+        runner.Enqueue(new(unchecked((int)0x80070002), "",
+            "Installer failed with exit code: 0x80070002 : The system cannot find the file specified."));
+        var source = new WingetSource(new StubResolver(), runner);
+        var context = new ToolContext("winget.exe", "1.29", ToolResolutionOrigin.Custom, []);
+
+        var error = await Assert.ThrowsAsync<SourceException>(() =>
+            source.UpdateAsync(new("Anthropic.Claude", "Claude", "1.25927.0"), context));
+
+        Assert.True(error.CanRetryElevated);
+    }
+
+    [Fact]
+    public async Task PipProbeFallsThroughBrokenInterpreterToWorkingOne()
+    {
+        var runner = new StubRunner();
+        runner.Enqueue(new(1, "", "Python was not found; run without arguments to install from the Microsoft Store."));
+        runner.Enqueue(new(0, "pip 25.0 from C:\\real\\lib\\site-packages\\pip (python 3.13)", ""));
+        var source = new PipSource(new DescriptorResolver(d => d.ExecutableName == "py"
+            ? new ResolvedTool("C:\\stubs\\py.exe", ToolResolutionOrigin.Path, ["C:\\stubs"])
+            : new ResolvedTool("C:\\real\\python.exe", ToolResolutionOrigin.Path, ["C:\\real"])), runner);
+
+        var probe = await source.ProbeAsync();
+
+        Assert.True(probe.IsAvailable);
+        Assert.Equal("C:\\real\\python.exe", probe.Context!.ExecutablePath);
+        Assert.Equal(["-m", "pip"], probe.Context.PrefixArguments);
+        Assert.Equal(2, runner.Invocations.Count);
+    }
+
+    [Fact]
+    public async Task PipProbeReportsLastIssueWhenEveryInterpreterFails()
+    {
+        var runner = new StubRunner();
+        runner.Enqueue(new(1, "", "no pip for py"));
+        runner.Enqueue(new(1, "", "no pip for python"));
+        var source = new PipSource(new DescriptorResolver(d => d.ExecutableName == "py"
+            ? new ResolvedTool("C:\\stubs\\py.exe", ToolResolutionOrigin.Path, ["C:\\stubs"])
+            : new ResolvedTool("C:\\stubs\\python.exe", ToolResolutionOrigin.Path, ["C:\\stubs"])), runner);
+
+        var probe = await source.ProbeAsync();
+
+        Assert.False(probe.IsAvailable);
+        Assert.NotNull(probe.Issue);
     }
 
     [Fact]

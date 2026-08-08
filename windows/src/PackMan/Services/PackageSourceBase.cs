@@ -93,3 +93,6 @@ public sealed class SourceException(SourceIssueKind kind, string message, bool c
 }
 
 public sealed class PackageUpdateCanceledException(string message) : Exception(message);
+
+public sealed class ElevationDeclinedException()
+    : Exception("Administrator approval was declined; the update did not run.");

@@ -97,7 +97,8 @@ public sealed class ProcessRunner(IElevationBroker elevationBroker) : IProcessRu
         catch (OperationCanceledException)
         {
             TryKill(process);
-            try { await process.WaitForExitAsync(CancellationToken.None); } catch { }
+            try { await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10)); }
+            catch { }
             if (timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
                 throw new TimeoutException($"'{Path.GetFileName(invocation.FileName)}' timed out after {timeout.TotalSeconds:0}s.");
             throw;
@@ -138,10 +139,14 @@ public sealed class ProcessRunner(IElevationBroker elevationBroker) : IProcessRu
     private static string BuildCmdCommand(string fileName, IReadOnlyList<string> arguments) =>
         QuoteForCmd(fileName) + (arguments.Count == 0 ? "" : " " + string.Join(" ", arguments.Select(QuoteForCmd)));
 
-    private static string QuoteForCmd(string value)
+    internal static string QuoteForCmd(string value)
     {
         if (value.Any(c => c is '\r' or '\n' or '&' or '|' or '<' or '>' or '^' or '%' or '!'))
             throw new SourceException(SourceIssueKind.Configuration, "An unsafe command argument was rejected.");
+        // Quote only when necessary: some .cmd shims (scoop) rewrite double quotes in %* to
+        // single quotes, so unconditionally quoted arguments arrive corrupted.
+        if (value.Length > 0 && !value.Any(c => char.IsWhiteSpace(c) || c is '"'))
+            return value;
         return '"' + value.Replace("\"", "\"\"") + '"';
     }
 

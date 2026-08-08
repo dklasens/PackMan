@@ -74,7 +74,9 @@ public sealed class NpmSource(IToolResolver resolver, IProcessRunner runner) : P
     }
 
     private static readonly Regex ErrorPathPattern = new(
-        @"(?im)^npm (?:error|err!) path (?<path>[^\r\n]+)$", RegexOptions.Compiled);
+        // ProcessRunner rebuilds output with Environment.NewLine, so lines end \r\n on real
+        // runs even when the tool itself emitted \n. Tolerate the \r before the end anchor.
+        @"(?im)^npm (?:error|err!) path (?<path>[^\r\n]+?)\r?$", RegexOptions.Compiled);
 
     private async Task<bool> IsMissingGlobalPrefixAsync(ProcessResult failure, ToolContext context,
         CancellationToken cancellationToken)

@@ -10,6 +10,7 @@ public enum SourceScanStatus
     Waiting,
     Probing,
     Scanning,
+    Installing,
     Succeeded,
     Partial,
     Unavailable,
@@ -36,7 +37,7 @@ public partial class SourceState : ObservableObject
         Phase = phase;
         UpdateCount = updateCount;
         Issues = issues ?? [];
-        if (status is SourceScanStatus.Probing or SourceScanStatus.Scanning)
+        if (status is SourceScanStatus.Probing or SourceScanStatus.Scanning or SourceScanStatus.Installing)
             StartedAt ??= DateTimeOffset.Now;
         if (status is SourceScanStatus.Succeeded or SourceScanStatus.Partial or SourceScanStatus.Unavailable
             or SourceScanStatus.Failed or SourceScanStatus.Cancelled)
@@ -45,7 +46,7 @@ public partial class SourceState : ObservableObject
     }
 }
 
-public enum AppOperationKind { Idle, Scanning, Updating, Cancelling }
+public enum AppOperationKind { Idle, Scanning, Updating, Installing, Cancelling }
 public enum ScanSummaryKind
 {
     NotStarted,

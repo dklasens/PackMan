@@ -9,6 +9,27 @@ public sealed class ScoopSource(IToolResolver resolver, IProcessRunner runner) :
         [Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "scoop", "shims", "scoop.cmd")],
         "https://scoop.sh/");
 
+    public override async Task<SourceProbe> ProbeAsync(CancellationToken cancellationToken = default)
+    {
+        var probe = await base.ProbeAsync(cancellationToken);
+        if (probe.IsAvailable || probe.Issue?.Kind is SourceIssueKind.Unavailable) return probe;
+        // Older scoop builds reject --version; `scoop help` is always available.
+        var resolution = await Resolver.ResolveAsync(Descriptor, cancellationToken);
+        if (resolution.Tool is null) return probe;
+        try
+        {
+            var result = await Runner.RunAsync(new ProcessInvocation(resolution.Tool.Path,
+                (resolution.Tool.PrefixArguments ?? []).Append("help").ToArray(),
+                BuildEnvironment(resolution.Tool.PathEntries), TimeSpan.FromSeconds(15)),
+                cancellationToken: cancellationToken);
+            return result.Success
+                ? SourceProbe.Available(new ToolContext(resolution.Tool.Path, "Available",
+                    resolution.Tool.Origin, resolution.Tool.PathEntries, resolution.Tool.PrefixArguments))
+                : probe;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException) { return probe; }
+    }
+
     public override async Task<SourceScanReport> ScanAsync(ToolContext context,
         IProgress<SourcePhase>? progress = null, CancellationToken cancellationToken = default)
     {
