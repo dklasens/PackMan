@@ -36,8 +36,16 @@ public sealed class ElevationBrokerTests
             ElevationBroker.DaclSecurityInformation | ElevationBroker.LabelSecurityInformation);
 
         var userSid = System.Security.Principal.WindowsIdentity.GetCurrent().User!.Value;
-        Assert.True(sddl.Contains($"D:(A;;FA;;;{userSid})", StringComparison.OrdinalIgnoreCase), $"SDDL was: {sddl}");
-        Assert.True(sddl.Contains("S:(ML;;NW;;;LW)", StringComparison.OrdinalIgnoreCase), $"SDDL was: {sddl}");
+        var match = System.Text.RegularExpressions.Regex.Match(sddl,
+            @"^D:\(A;;FA;;;(?<trustee>[^)]+)\)S:\(ML;;NW;;;LW\)$");
+        Assert.True(match.Success, $"SDDL was: {sddl}");
+        // Windows serializes well-known account SIDs as mnemonics (LA on CI runners), so
+        // compare against the same round-trip of the current user's SID.
+        var expected = new System.Security.AccessControl.RawSecurityDescriptor($"D:(A;;FA;;;{userSid})")
+            .GetSddlForm(System.Security.AccessControl.AccessControlSections.Access);
+        var expectedTrustee = System.Text.RegularExpressions.Regex.Match(expected,
+            @"^D:\(A;;FA;;;(?<trustee>[^)]+)\)$").Groups["trustee"].Value;
+        Assert.Equal(expectedTrustee, match.Groups["trustee"].Value);
     }
 
     private static string ReadSecurityDescriptor(System.Runtime.InteropServices.SafeHandle handle, int sections)
