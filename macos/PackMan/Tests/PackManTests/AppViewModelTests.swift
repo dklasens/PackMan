@@ -269,9 +269,13 @@ final class AppViewModelTests: XCTestCase {
 
     private func waitUntilIdle(_ viewModel: AppViewModel, timeout: TimeInterval = 2) async throws {
         let deadline = Date.now.addingTimeInterval(timeout)
-        while viewModel.isBusy || viewModel.operation != .idle {
+        // Deterministic completion tracking: start calls bump startedOperations
+        // synchronously, the operation task bumps completedOperations when done,
+        // so instant operations cannot race the wait.
+        let target = viewModel.startedOperations
+        while viewModel.completedOperations < target || viewModel.isBusy {
             if Date.now > deadline { throw WaitError.timedOut }
-            try await Task.sleep(nanoseconds: 5_000_000)
+            try await Task.sleep(nanoseconds: 2_000_000)
         }
         // The task clears its ownership immediately after returning to idle.
         try await Task.sleep(nanoseconds: 5_000_000)

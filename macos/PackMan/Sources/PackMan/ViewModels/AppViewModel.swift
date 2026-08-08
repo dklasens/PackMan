@@ -71,6 +71,8 @@ final class AppViewModel {
     @ObservationIgnored private var activeTask: Task<Void, Never>?
     @ObservationIgnored private var nextLogID = 0
     @ObservationIgnored private var lastOutputByCommandAndStream: [String: String] = [:]
+    @ObservationIgnored internal private(set) var startedOperations = 0
+    @ObservationIgnored internal private(set) var completedOperations = 0
 
     private static let maxLogLines = 1000
 
@@ -183,6 +185,7 @@ final class AppViewModel {
         activeTask = Task { [weak self] in
             await self?.runScan(sourceIDs: Set(enabled), fresh: true)
         }
+        startedOperations += 1
     }
 
     func retryIssues() {
@@ -192,6 +195,7 @@ final class AppViewModel {
         activeTask = Task { [weak self] in
             await self?.runScan(sourceIDs: ids, fresh: false)
         }
+        startedOperations += 1
     }
 
     func cancelOperation() {
@@ -305,6 +309,7 @@ final class AppViewModel {
         let options = sourceOptions.filter { sourceIDs.contains($0.id) && $0.isEnabled }
         guard !options.isEmpty else {
             activeTask = nil
+            completedOperations += 1
             return
         }
 
@@ -395,6 +400,7 @@ final class AppViewModel {
         applySort()
         operation = .idle
         activeTask = nil
+        completedOperations += 1
     }
 
     private func apply(_ outcome: SourceOutcome) {
@@ -478,6 +484,7 @@ final class AppViewModel {
         activeTask = Task { [weak self] in
             await self?.runUpdates(selected)
         }
+        startedOperations += 1
     }
 
     private func runUpdates(_ selected: [PackageUpdate]) async {
@@ -662,6 +669,7 @@ final class AppViewModel {
         }
         operation = .idle
         activeTask = nil
+        completedOperations += 1
     }
 
     private func setSourceProbing(_ id: SourceID) {

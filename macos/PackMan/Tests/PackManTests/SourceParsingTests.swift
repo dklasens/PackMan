@@ -171,13 +171,13 @@ final class SourceParsingTests: XCTestCase {
     func testMasUpdateHandsOffToTerminalElevation() async throws {
         let runner = StubProcessRunner()
         let source = MasSource(runner: runner, resolver: StubResolver(resolution: .notFound))
-        var streamed: [String] = []
+        let recorder = OutputRecorder()
 
         do {
             try await source.update(
                 request: UpdateRequest(packageID: "6445813049", name: "Spark Desktop", targetVersion: "3.30.5"),
                 context: masToolContext(executablePath: "/opt/homebrew/bin/mas")) { event in
-                    streamed.append(event.line)
+                    await recorder.append(event.line)
                 }
             XCTFail("Expected requiresTerminalUpdate")
         } catch let error as SourceError {
@@ -189,6 +189,7 @@ final class SourceParsingTests: XCTestCase {
             XCTAssertTrue(error.errorDescription?.contains("logged-in session") == true)
         }
 
+        let streamed = await recorder.lines
         XCTAssertEqual(streamed, ["sudo mas update --force 6445813049"])
         let invocations = await runner.invocations
         XCTAssertTrue(invocations.isEmpty, "No process may be launched for the handoff")
@@ -365,4 +366,9 @@ private struct StaticHTTPClient: HTTPDataLoading {
     func data(for request: URLRequest) async throws -> HTTPDataResponse {
         HTTPDataResponse(data: Data(body.utf8), statusCode: statusCode)
     }
+}
+
+private actor OutputRecorder {
+    private(set) var lines: [String] = []
+    func append(_ line: String) { lines.append(line) }
 }
