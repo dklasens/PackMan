@@ -20,6 +20,7 @@
 		5A6276D73C77CA701EE195B5 /* PackManUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F8FA0281571EF0B417CCBCA /* PackManUITests.swift */; };
 		5C84717E0CB538F4F9C77F5E /* PipSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF77282419674E115B99BD9D /* PipSource.swift */; };
 		615AC161F0A16B4F7180062F /* SourceParsingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 584FCE81FB2F8AA4405C1462 /* SourceParsingTests.swift */; };
+		6572B0A4FAC330F5FD7CDB5E /* DotnetSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EBD57956D98F719321BC8E1 /* DotnetSource.swift */; };
 		669CC4FA6EBB4A7A123054DC /* AppEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FD3B1AA8DD9B44674A720AF /* AppEnvironment.swift */; };
 		7406B68958495ECF7CA2B57C /* PackageUpdate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1793296EB1E4C4476BB8F7B /* PackageUpdate.swift */; };
 		77B648A721AA79F490E29FDC /* SortingAndRefreshTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23348878572F1EBB858E17D8 /* SortingAndRefreshTests.swift */; };
@@ -71,6 +72,7 @@
 		436C35B17C4AAA14340CDEFC /* AppViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModelTests.swift; sourceTree = "<group>"; };
 		4D1E26107917FA36B022B719 /* npm-outdated.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "npm-outdated.json"; sourceTree = "<group>"; };
 		4E0CB1FDAD3A2D663C402377 /* MasSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MasSource.swift; sourceTree = "<group>"; };
+		4EBD57956D98F719321BC8E1 /* DotnetSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DotnetSource.swift; sourceTree = "<group>"; };
 		584FCE81FB2F8AA4405C1462 /* SourceParsingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceParsingTests.swift; sourceTree = "<group>"; };
 		6EED5F6D2A6D6DEEA286FF89 /* ToolResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolResolver.swift; sourceTree = "<group>"; };
 		73B3E893ED0F0E5769B99B85 /* brew-outdated.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "brew-outdated.json"; sourceTree = "<group>"; };
@@ -158,6 +160,7 @@
 			isa = PBXGroup;
 			children = (
 				8F883385FF31D4F8979E97A5 /* BrewSource.swift */,
+				4EBD57956D98F719321BC8E1 /* DotnetSource.swift */,
 				4E0CB1FDAD3A2D663C402377 /* MasSource.swift */,
 				E74120D2BBA4B474321DD278 /* NpmSource.swift */,
 				E22CF33338FE25C32EB5465C /* PackageSource.swift */,
@@ -403,6 +406,7 @@
 				0A8D58E97E825468F3CC5B14 /* AppViewModel.swift in Sources */,
 				31DE4F763616EC5A6A5CBB61 /* BrewSource.swift in Sources */,
 				0BF4CD16D76A1804503FE46C /* ContentView.swift in Sources */,
+				6572B0A4FAC330F5FD7CDB5E /* DotnetSource.swift in Sources */,
 				0FDA56AC01D923C0DF7EB322 /* MasSource.swift in Sources */,
 				0F9ED6E2B58D43074114EE0F /* NpmSource.swift in Sources */,
 				A6EEE53C6EE4DEE92D0BCEE0 /* PackManApp.swift in Sources */,
@@ -509,7 +513,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0.0;
+				MARKETING_VERSION = 1.6.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -652,7 +656,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0.0;
+				MARKETING_VERSION = 1.6.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";

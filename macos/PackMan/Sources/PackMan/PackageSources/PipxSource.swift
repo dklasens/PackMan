@@ -144,7 +144,7 @@ struct PipxSource: PackageSource {
                 }
             }
 
-            for _ in 0..<min(4, installed.count) { enqueue() }
+            for _ in 0..<min(8, installed.count) { enqueue() }
             while let lookup = await group.next() {
                 results.append(lookup)
                 enqueue()

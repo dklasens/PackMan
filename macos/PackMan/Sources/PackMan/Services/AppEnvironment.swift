@@ -117,4 +117,9 @@ private final class UITestSettings: SettingsStoring, @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         overridePath = path
     }
+
+    func cachedContext(for sourceID: SourceID) -> ToolContext? { nil }
+    func setCachedContext(_ context: ToolContext?, for sourceID: SourceID) throws {}
+    func ignoredUpdateKeys() -> Set<String> { [] }
+    func setUpdateIgnored(_ key: String, ignored: Bool) throws {}
 }

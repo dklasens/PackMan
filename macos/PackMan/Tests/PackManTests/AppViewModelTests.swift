@@ -114,6 +114,80 @@ final class AppViewModelTests: XCTestCase {
         }
     }
 
+    func testSecondScanUsesCachedProbeContext() async throws {
+        let probes = Counter()
+        let source = StubSource(
+            id: .npm,
+            name: "npm",
+            probe: {
+                await probes.increment()
+                return .available(testToolContext)
+            },
+            scan: { SourceScanReport() })
+        let viewModel = AppViewModel(sources: [source], settings: MemorySettings())
+
+        viewModel.startScan()
+        try await waitUntilIdle(viewModel)
+        viewModel.startScan()
+        try await waitUntilIdle(viewModel)
+
+        let probeCount = await probes.value
+        XCTAssertEqual(probeCount, 1)
+    }
+
+    func testIgnoredUpdateStaysHiddenUntilRuleIsRestored() async throws {
+        let update = PackageInfo(id: "tool", name: "Tool", currentVersion: "1", availableVersion: "2")
+        let settings = MemorySettings()
+        let source = availableSource(id: .npm, name: "npm", report: SourceScanReport(updates: [update]))
+        let viewModel = AppViewModel(sources: [source], settings: settings)
+        viewModel.startScan()
+        try await waitUntilIdle(viewModel)
+
+        viewModel.ignore(try XCTUnwrap(viewModel.packages.first), versionOnly: true)
+        XCTAssertTrue(viewModel.packages.isEmpty)
+        XCTAssertEqual(settings.ignoredUpdateKeys(), ["npm:tool@2"])
+
+        viewModel.startScan()
+        try await waitUntilIdle(viewModel)
+        XCTAssertTrue(viewModel.packages.isEmpty)
+
+        viewModel.removeIgnored("npm:tool@2")
+        viewModel.startScan()
+        try await waitUntilIdle(viewModel)
+        XCTAssertEqual(viewModel.packages.map(\.packageID), ["tool"])
+    }
+
+    func testVerificationRunsAcrossSourcesConcurrently() async throws {
+        let barrier = AsyncBarrier(participantCount: 2)
+        let first = StubSource(
+            id: .npm,
+            name: "npm",
+            probe: { .available(testToolContext) },
+            scan: { SourceScanReport(updates: [PackageInfo(id: "one", name: "one", currentVersion: "1", availableVersion: "2")]) },
+            verify: { requests in
+                try await barrier.arriveAndWait()
+                return Dictionary(uniqueKeysWithValues: requests.map { ($0.packageID, .satisfied(installedVersion: $0.targetVersion)) })
+            })
+        let second = StubSource(
+            id: .pip,
+            name: "pip",
+            probe: { .available(testToolContext) },
+            scan: { SourceScanReport(updates: [PackageInfo(id: "two", name: "two", currentVersion: "1", availableVersion: "2")]) },
+            verify: { requests in
+                try await barrier.arriveAndWait()
+                return Dictionary(uniqueKeysWithValues: requests.map { ($0.packageID, .satisfied(installedVersion: $0.targetVersion)) })
+            })
+        let viewModel = AppViewModel(sources: [first, second], settings: MemorySettings())
+        viewModel.startScan()
+        try await waitUntilIdle(viewModel)
+
+        viewModel.startUpdateSelected()
+        try await waitUntilIdle(viewModel)
+
+        XCTAssertTrue(viewModel.packages.isEmpty)
+        XCTAssertEqual(viewModel.updateSummary?.updated, 2)
+    }
+
     func testVerifiedUpdateIsRemovedAndSummarized() async throws {
         let update = PackageInfo(id: "tool", name: "tool", currentVersion: "1", availableVersion: "2")
         let source = availableSource(id: .npm, name: "npm", report: SourceScanReport(updates: [update]))
@@ -231,5 +305,33 @@ private actor TestGate {
         isOpen = true
         continuation?.resume()
         continuation = nil
+    }
+}
+
+private actor Counter {
+    private(set) var value = 0
+    func increment() { value += 1 }
+}
+
+private actor AsyncBarrier {
+    private let participantCount: Int
+    private var arrivals = 0
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    init(participantCount: Int) {
+        self.participantCount = participantCount
+    }
+
+    func arriveAndWait() async throws {
+        try Task.checkCancellation()
+        arrivals += 1
+        if arrivals == participantCount {
+            let waiting = continuations
+            continuations.removeAll()
+            waiting.forEach { $0.resume() }
+            return
+        }
+        await withCheckedContinuation { continuations.append($0) }
+        try Task.checkCancellation()
     }
 }

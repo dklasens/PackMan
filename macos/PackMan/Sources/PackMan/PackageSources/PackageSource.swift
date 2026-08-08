@@ -7,6 +7,7 @@ enum SourceID: String, CaseIterable, Codable, Hashable, Sendable, Identifiable {
     case npm
     case pip
     case pipx
+    case dotnet
 
     var id: String { rawValue }
 }
@@ -17,6 +18,7 @@ enum ToolID: String, CaseIterable, Codable, Hashable, Sendable {
     case npm
     case python
     case pipx
+    case dotnet
 }
 
 struct SourceDescriptor: Identifiable, Hashable, Sendable {
@@ -28,7 +30,7 @@ struct SourceDescriptor: Identifiable, Hashable, Sendable {
     let installationURL: URL?
 }
 
-enum ToolResolutionOrigin: String, Sendable {
+enum ToolResolutionOrigin: String, Codable, Sendable {
     case explicit = "Custom"
     case inheritedPath = "PATH"
     case knownPath = "Known location"
@@ -126,17 +128,20 @@ enum SourceError: LocalizedError, Equatable {
     case invalidTargetVersion(String)
     case commandFailed(String)
     case verificationFailed(String)
+    case requiresTerminalUpdate(String)
 
     var errorDescription: String? {
         switch self {
         case let .toolNotFound(tool):
             return "\(tool) was not found."
-        case let .invalidPackageId(id):
+        case .invalidPackageId(let id):
             return "Refusing to update package with invalid id '\(id)'."
-        case let .invalidTargetVersion(version):
+        case .invalidTargetVersion(let version):
             return "Refusing to use invalid target version '\(version)'."
-        case let .commandFailed(message), let .verificationFailed(message):
+        case .commandFailed(let message), .verificationFailed(let message):
             return message
+        case .requiresTerminalUpdate(let command):
+            return "App Store updates cannot be installed from within PackMan because macOS ties App Store commerce to your logged-in session. Run `\(command)` in Terminal, or choose Open in App Store, then scan again."
         }
     }
 }
@@ -167,6 +172,15 @@ extension PackageSource {
     var name: String { descriptor.name }
     var id: SourceID { descriptor.id }
 
+    var requirementHint: String? {
+        switch id {
+        case .appStore:
+            return "Updates require mas 4 or newer and an Apple Account signed in to the App Store."
+        default:
+            return nil
+        }
+    }
+
     func verify(
         requests: [UpdateRequest],
         context: ToolContext
@@ -189,6 +203,69 @@ extension PackageSource {
 extension String {
     var trimmed: String {
         trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Removes terminal formatting and other control characters before command
+    /// output is presented in the SwiftUI log or an error message.
+    var terminalSanitized: String {
+        let scalars = unicodeScalars
+        var result = String.UnicodeScalarView()
+        var index = scalars.startIndex
+
+        while index < scalars.endIndex {
+            let scalar = scalars[index]
+            let value = scalar.value
+
+            // Accept both a real ESC and the control-picture glyph sometimes
+            // produced when an ESC passes through a text rendering layer.
+            if value == 0x1B || value == 0x241B {
+                let next = scalars.index(after: index)
+                guard next < scalars.endIndex else { break }
+                let introducer = scalars[next].value
+
+                if introducer == 0x5B { // CSI: ESC [ ... final byte
+                    index = scalars.index(after: next)
+                    while index < scalars.endIndex {
+                        let byte = scalars[index].value
+                        index = scalars.index(after: index)
+                        if (0x40...0x7E).contains(byte) { break }
+                    }
+                    continue
+                }
+
+                if introducer == 0x5D { // OSC: ESC ] ... BEL or ESC \
+                    index = scalars.index(after: next)
+                    while index < scalars.endIndex {
+                        let byte = scalars[index].value
+                        if byte == 0x07 {
+                            index = scalars.index(after: index)
+                            break
+                        }
+                        if byte == 0x1B || byte == 0x241B {
+                            let terminator = scalars.index(after: index)
+                            if terminator < scalars.endIndex, scalars[terminator].value == 0x5C {
+                                index = scalars.index(after: terminator)
+                                break
+                            }
+                        }
+                        index = scalars.index(after: index)
+                    }
+                    continue
+                }
+
+                // Other two-byte escape sequences.
+                index = scalars.index(after: next)
+                continue
+            }
+
+            // Preserve tabs and printable text. Carriage returns, backspaces,
+            // and other C0 controls otherwise render as visible glyphs.
+            if value == 0x09 || value >= 0x20 {
+                result.append(scalar)
+            }
+            index = scalars.index(after: index)
+        }
+        return String(result)
     }
 }
 

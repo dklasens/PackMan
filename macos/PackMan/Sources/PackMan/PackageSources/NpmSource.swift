@@ -102,18 +102,21 @@ struct NpmSource: PackageSource {
         requests: [UpdateRequest],
         context: ToolContext
     ) async throws -> [String: UpdateVerification] {
+        try Task.checkCancellation()
+        let result = try await runner.run(
+            context.executablePath,
+            ["list", "-g", "--depth=0", "--json"],
+            timeout: 60,
+            environment: SourceSupport.environment(pathEntries: context.pathEntries))
+        guard result.succeeded || result.exitCode == 1,
+              let data = result.stdout.data(using: .utf8),
+              let list = try? JSONDecoder().decode(NpmListResult.self, from: data) else {
+            throw SourceError.verificationFailed("npm could not confirm the installed versions.")
+        }
+
         var verification: [String: UpdateVerification] = [:]
         for request in requests {
-            try Task.checkCancellation()
-            let result = try await runner.run(
-                context.executablePath,
-                ["list", "-g", "--depth=0", "--json", request.packageID],
-                timeout: 60,
-                environment: SourceSupport.environment(pathEntries: context.pathEntries))
-            guard result.succeeded || result.exitCode == 1,
-                  let data = result.stdout.data(using: .utf8),
-                  let list = try? JSONDecoder().decode(NpmListResult.self, from: data),
-                  let installed = list.dependencies?[request.packageID]?.version else {
+            guard let installed = list.dependencies?[request.packageID]?.version else {
                 throw SourceError.verificationFailed("npm could not confirm the installed version of \(request.name).")
             }
             if installed == request.targetVersion {

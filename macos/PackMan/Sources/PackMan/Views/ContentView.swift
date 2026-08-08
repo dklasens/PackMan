@@ -3,14 +3,11 @@ import SwiftUI
 
 struct ContentView: View {
     @Bindable var viewModel: AppViewModel
-    @State private var showsSources = false
 
     var body: some View {
         VStack(spacing: 0) {
-            if hasPersistentIssueBanner {
-                IssueBanner(viewModel: viewModel) {
-                    showsSources = true
-                }
+            if viewModel.showsIssueBanner {
+                IssueBanner(viewModel: viewModel)
             }
 
             if isScanning {
@@ -36,7 +33,7 @@ struct ContentView: View {
             FooterView(viewModel: viewModel)
         }
         .toolbar { toolbarContent }
-        .sheet(isPresented: $showsSources) {
+        .sheet(isPresented: $viewModel.isSourcesSheetPresented) {
             SourcesView(viewModel: viewModel)
                 .frame(minWidth: 620, minHeight: 430)
         }
@@ -70,13 +67,6 @@ struct ContentView: View {
                return false
            }) { return true }
         return false
-    }
-
-    private var hasPersistentIssueBanner: Bool {
-        switch viewModel.scanSummary {
-        case .completedWithIssues, .allUnavailable, .cancelled: return true
-        default: return false
-        }
     }
 
     @ToolbarContentBuilder
@@ -136,7 +126,7 @@ struct ContentView: View {
 
         ToolbarItem(placement: .primaryAction) {
             Button {
-                showsSources = true
+                viewModel.isSourcesSheetPresented = true
             } label: {
                 Label("Sources", systemImage: viewModel.issueSources.isEmpty
                     ? "line.3.horizontal.decrease.circle"
@@ -243,6 +233,41 @@ private struct PackageTable: View {
                             } label: {
                                 Label("Copy Package ID", systemImage: "doc.on.doc")
                             }
+
+                            if package.sourceID == .appStore {
+                                Button {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(
+                                        MasSource.terminalUpdateCommand(forADAMID: package.packageID),
+                                        forType: .string)
+                                } label: {
+                                    Label("Copy Terminal Update Command", systemImage: "terminal")
+                                }
+
+                                if let appStoreURL = MasSource.appStorePageURL(forADAMID: package.packageID) {
+                                    Button {
+                                        NSWorkspace.shared.open(appStoreURL)
+                                    } label: {
+                                        Label("Open in App Store", systemImage: "app.badge")
+                                    }
+                                }
+                            }
+
+                            Divider()
+
+                            Button {
+                                viewModel.ignore(package, versionOnly: true)
+                            } label: {
+                                Label("Ignore Version \(package.availableVersion)", systemImage: "eye.slash")
+                            }
+                            .disabled(viewModel.isBusy)
+
+                            Button {
+                                viewModel.ignore(package, versionOnly: false)
+                            } label: {
+                                Label("Ignore All Updates for \(package.name)", systemImage: "nosign")
+                            }
+                            .disabled(viewModel.isBusy)
                         }
                 }
             }
@@ -415,7 +440,10 @@ private struct EmptyStateView: View {
                 systemImage: "arrow.clockwise",
                 description: Text("Updates will appear as each source completes."))
         case .updatesAvailable:
-            ContentUnavailableView("No Displayable Updates", systemImage: "shippingbox")
+            ContentUnavailableView(
+                "No Displayable Updates",
+                systemImage: "shippingbox",
+                description: Text("Updates found by the last scan are hidden by ignore rules. See Sources → Ignored Updates."))
         case .updatesCompleted(let date):
             state(
                 title: "Updates Completed",
@@ -480,7 +508,6 @@ private struct EmptyStateView: View {
 
 private struct IssueBanner: View {
     @Bindable var viewModel: AppViewModel
-    let onShowSources: () -> Void
 
     var body: some View {
         HStack(spacing: 10) {
@@ -493,7 +520,7 @@ private struct IssueBanner: View {
                 Button("Retry Issues") { viewModel.retryIssues() }
                     .disabled(viewModel.isBusy)
             }
-            Button("Sources", action: onShowSources)
+            Button("Sources") { viewModel.isSourcesSheetPresented = true }
         }
         .font(.callout)
         .padding(.horizontal, 16)
@@ -508,7 +535,7 @@ private struct FooterView: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Text(viewModel.statusText)
+            Text(viewModel.footerStatusText)
                 .lineLimit(1)
             Spacer()
             if !viewModel.issueSources.isEmpty {
@@ -627,14 +654,50 @@ private struct SourcesView: View {
             Divider()
 
             ScrollView {
-                LazyVStack(spacing: 0) {
+                LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(viewModel.sourceOptions) { option in
                         SourceSettingsRow(viewModel: viewModel, option: option)
                         Divider().padding(.leading, 48)
                     }
+
+                    if viewModel.hasIgnoredUpdates {
+                        IgnoredUpdatesView(viewModel: viewModel)
+                    }
                 }
             }
         }
+    }
+}
+
+private struct IgnoredUpdatesView: View {
+    @Bindable var viewModel: AppViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Ignored Updates")
+                .font(.headline)
+            Text("Restored updates become visible the next time you scan.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            ForEach(viewModel.ignoredUpdates, id: \.self) { key in
+                HStack {
+                    Image(systemName: "eye.slash")
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                    Text(AppViewModel.displayName(forIgnoreKey: key))
+                        .lineLimit(1)
+                        .help(key)
+                    Spacer()
+                    Button("Restore") { viewModel.removeIgnored(key) }
+                        .disabled(viewModel.isBusy)
+                        .accessibilityLabel("Restore \(AppViewModel.displayName(forIgnoreKey: key))")
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityIdentifier("ignoredUpdates")
     }
 }
 
@@ -656,6 +719,17 @@ private struct SourceSettingsRow: View {
                     SourceStateIcon(state: option.scanState)
                     Text(sourceStatus)
                         .foregroundStyle(statusColor)
+                    if let completedAt = option.scanState.completedAt {
+                        Text("• Last checked \(completedAt.formatted(date: .omitted, time: .shortened))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let hint = option.source.requirementHint {
+                    Text(hint)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 if let context = option.toolContext {

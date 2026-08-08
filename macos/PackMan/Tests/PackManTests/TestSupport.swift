@@ -26,10 +26,15 @@ actor StubProcessRunner: ProcessRunning {
     }
 
     private var stubs: [String: [Stub]] = [:]
+    private var anyStubs: [Stub] = []
     private(set) var invocations: [Invocation] = []
 
     func enqueue(arguments: [String], stub: Stub) {
         stubs[arguments.joined(separator: "\u{0}"), default: []].append(stub)
+    }
+
+    func enqueueAny(stub: Stub) {
+        anyStubs.append(stub)
     }
 
     func run(
@@ -41,11 +46,15 @@ actor StubProcessRunner: ProcessRunning {
     ) async throws -> ProcessResult {
         invocations.append(Invocation(executable: executable, arguments: arguments, environment: environment))
         let key = arguments.joined(separator: "\u{0}")
-        guard var queued = stubs[key], !queued.isEmpty else {
+        let stub: Stub
+        if var queued = stubs[key], !queued.isEmpty {
+            stub = queued.removeFirst()
+            stubs[key] = queued
+        } else if !anyStubs.isEmpty {
+            stub = anyStubs.removeFirst()
+        } else {
             fatalError("No stub for \(arguments)")
         }
-        let stub = queued.removeFirst()
-        stubs[key] = queued
         if stub.delayNanoseconds > 0 {
             try await Task.sleep(nanoseconds: stub.delayNanoseconds)
         }
@@ -65,11 +74,21 @@ final class MemorySettings: SettingsStoring, @unchecked Sendable {
     private let lock = NSLock()
     private var enabled: [SourceID: Bool]
     private var overrides: [ToolID: String]
+    private var cachedContexts: [SourceID: ToolContext]
+    private var ignored: Set<String>
     let loadIssue: String?
 
-    init(enabled: [SourceID: Bool] = [:], overrides: [ToolID: String] = [:], loadIssue: String? = nil) {
+    init(
+        enabled: [SourceID: Bool] = [:],
+        overrides: [ToolID: String] = [:],
+        cachedContexts: [SourceID: ToolContext] = [:],
+        ignored: Set<String> = [],
+        loadIssue: String? = nil
+    ) {
         self.enabled = enabled
         self.overrides = overrides
+        self.cachedContexts = cachedContexts
+        self.ignored = ignored
         self.loadIssue = loadIssue
     }
 
@@ -91,6 +110,26 @@ final class MemorySettings: SettingsStoring, @unchecked Sendable {
     func setExecutableOverride(_ path: String?, for toolID: ToolID) throws {
         lock.lock(); defer { lock.unlock() }
         overrides[toolID] = path
+    }
+
+    func cachedContext(for sourceID: SourceID) -> ToolContext? {
+        lock.lock(); defer { lock.unlock() }
+        return cachedContexts[sourceID]
+    }
+
+    func setCachedContext(_ context: ToolContext?, for sourceID: SourceID) throws {
+        lock.lock(); defer { lock.unlock() }
+        cachedContexts[sourceID] = context
+    }
+
+    func ignoredUpdateKeys() -> Set<String> {
+        lock.lock(); defer { lock.unlock() }
+        return ignored
+    }
+
+    func setUpdateIgnored(_ key: String, ignored: Bool) throws {
+        lock.lock(); defer { lock.unlock() }
+        if ignored { self.ignored.insert(key) } else { self.ignored.remove(key) }
     }
 }
 

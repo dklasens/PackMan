@@ -13,6 +13,18 @@ final class SettingsAndResolverTests: XCTestCase {
         XCTAssertTrue(settings.isSourceEnabled(.pip))
     }
 
+    func testVersionTwoSettingsMigrateWithoutLosingSelectionsOrOverrides() throws {
+        let root = try temporaryDirectory()
+        let url = root.appendingPathComponent("settings.json")
+        try Data(#"{"version":2,"disabledSources":["pipx"],"executableOverrides":{"npm":"/custom/npm"}}"#.utf8)
+            .write(to: url)
+
+        let settings = SettingsStore(settingsURL: url)
+        XCTAssertFalse(settings.isSourceEnabled(.pipx))
+        XCTAssertEqual(settings.executableOverride(for: .npm), "/custom/npm")
+        XCTAssertTrue(settings.ignoredUpdateKeys().isEmpty)
+    }
+
     func testCorruptSettingsUseDefaultsAndExposeIssue() throws {
         let root = try temporaryDirectory()
         let url = root.appendingPathComponent("settings.json")
@@ -33,6 +45,30 @@ final class SettingsAndResolverTests: XCTestCase {
         let reloaded = SettingsStore(settingsURL: url)
         XCTAssertFalse(reloaded.isSourceEnabled(.pipx))
         XCTAssertEqual(reloaded.executableOverride(for: .pipx), "/custom/pipx")
+    }
+
+    func testSettingsPersistCachedContextsAndIgnoreRules() throws {
+        let root = try temporaryDirectory()
+        let url = root.appendingPathComponent("settings.json")
+        let executable = root.appendingPathComponent("dotnet")
+        try makeExecutable(executable)
+        let context = ToolContext(
+            executablePath: executable.path,
+            version: "10.0.100",
+            pathEntries: [root.path],
+            origin: .knownPath)
+
+        var settings: SettingsStore? = SettingsStore(settingsURL: url)
+        try settings?.setCachedContext(context, for: .dotnet)
+        try settings?.setUpdateIgnored("dotnet:dotnet-ef@10.0.1", ignored: true)
+        settings = nil
+
+        let reloaded = SettingsStore(settingsURL: url)
+        XCTAssertEqual(reloaded.cachedContext(for: .dotnet), context)
+        XCTAssertEqual(reloaded.ignoredUpdateKeys(), ["dotnet:dotnet-ef@10.0.1"])
+
+        try FileManager.default.removeItem(at: executable)
+        XCTAssertNil(reloaded.cachedContext(for: .dotnet), "Missing executables must invalidate cached probes")
     }
 
     func testResolverUsesInheritedPath() async throws {
@@ -234,6 +270,29 @@ final class SettingsAndResolverTests: XCTestCase {
         XCTAssertEqual(context.version, "pip 26.0")
         let invocations = await runner.invocations
         XCTAssertEqual(invocations.first?.arguments, ["-m", "pip", "--version"])
+    }
+
+    func testSettingsWritesAreRestrictedToOwner() throws {
+        let root = try temporaryDirectory()
+        let url = root.appendingPathComponent("settings.json")
+        let settings = SettingsStore(settingsURL: url)
+        try settings.setSource(.npm, enabled: false)
+        let permissions = try XCTUnwrap(
+            (try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber)?.intValue)
+        XCTAssertEqual(permissions & 0o077, 0, "Settings must not be readable or writable by group or others")
+    }
+
+    func testSettingsLoadRepairsLoosePermissions() throws {
+        let root = try temporaryDirectory()
+        let url = root.appendingPathComponent("settings.json")
+        try Data(#"{"version":3,"disabledSources":[],"executableOverrides":{}}"#.utf8).write(to: url)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
+
+        _ = SettingsStore(settingsURL: url)
+
+        let permissions = try XCTUnwrap(
+            (try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber)?.intValue)
+        XCTAssertEqual(permissions & 0o077, 0)
     }
 
     private var npmDescriptor: SourceDescriptor {

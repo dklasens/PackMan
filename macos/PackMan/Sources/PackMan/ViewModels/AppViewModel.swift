@@ -33,6 +33,23 @@ private struct SourceOutcome: Sendable {
     let result: Result
 }
 
+private struct VerificationBatch {
+    let source: any PackageSource
+    let context: ToolContext
+    let packages: [PackageUpdate]
+}
+
+private struct VerificationOutcome: Sendable {
+    enum Result: Sendable {
+        case verified([String: UpdateVerification])
+        case failed(String)
+        case cancelled
+    }
+
+    let sourceID: SourceID
+    let result: Result
+}
+
 @Observable
 @MainActor
 final class AppViewModel {
@@ -41,6 +58,7 @@ final class AppViewModel {
     var operation: AppOperation = .idle
     var scanSummary: ScanSummary = .notStarted
     var updateSummary: UpdateRunSummary?
+    var ignoredUpdates: [String] = []
     var sortOrder: [PackageSortComparator] = [
         PackageSortComparator(field: .source),
         PackageSortComparator(field: .name),
@@ -68,10 +86,12 @@ final class AppViewModel {
             NpmSource(),
             PipSource(),
             PipxSource(),
+            DotnetSource(),
         ]
         sourceOptions = configuredSources.map {
             SourceOption(source: $0, isEnabled: settings.isSourceEnabled($0.id))
         }
+        ignoredUpdates = settings.ignoredUpdateKeys().sorted()
         if let issue = settings.loadIssue {
             appendLog(issue, level: .warning)
         }
@@ -85,6 +105,32 @@ final class AppViewModel {
     var updateCount: Int { actionablePackages.count }
     var canUpdate: Bool { !isBusy && selectedCount > 0 }
     var issueSources: [SourceOption] { sourceOptions.filter { $0.isEnabled && $0.scanState.hasIssue } }
+    var hasIgnoredUpdates: Bool { !ignoredUpdates.isEmpty }
+    var isSourcesSheetPresented = false
+
+    var showsIssueBanner: Bool {
+        switch scanSummary {
+        case .completedWithIssues, .allUnavailable, .cancelled: return true
+        default: return false
+        }
+    }
+
+    var scanCompletedAt: Date? {
+        switch scanSummary {
+        case .updatesCompleted(let date), .upToDate(let date),
+             .completedWithIssues(_, _, let date), .allUnavailable(let date), .cancelled(let date):
+            return date
+        default:
+            return nil
+        }
+    }
+
+    var footerStatusText: String {
+        if showsIssueBanner, !isBusy, let completedAt = scanCompletedAt {
+            return "Last scanned \(completedAt.formatted(date: .omitted, time: .shortened))."
+        }
+        return statusText
+    }
 
     var statusText: String {
         switch operation {
@@ -186,6 +232,7 @@ final class AppViewModel {
         do {
             try settings.setExecutableOverride(path, for: toolID)
             for option in sourceOptions where option.descriptor.toolID == toolID {
+                try settings.setCachedContext(nil, for: option.id)
                 option.toolContext = nil
                 option.probeIssue = nil
                 option.scanState = option.isEnabled ? .notScanned : .disabled
@@ -212,6 +259,37 @@ final class AppViewModel {
     func selectNone() {
         guard !isBusy else { return }
         for package in actionablePackages { package.isSelected = false }
+    }
+
+    func ignore(_ package: PackageUpdate, versionOnly: Bool) {
+        guard !isBusy else { return }
+        let key = Self.ignoreKey(for: package, versionOnly: versionOnly)
+        do {
+            try settings.setUpdateIgnored(key, ignored: true)
+            if !ignoredUpdates.contains(key) {
+                ignoredUpdates.append(key)
+                ignoredUpdates.sort()
+            }
+            packages.removeAll { $0.id == package.id }
+            appendLog("Ignored \(package.name)\(versionOnly ? " \(package.availableVersion)" : ""); it will stay hidden.")
+            deriveScanSummary(completedAt: .now)
+            applySort()
+        } catch {
+            appendLog("Could not save the ignore rule: \(error.userMessage)", level: .error)
+            isLogVisible = true
+        }
+    }
+
+    func removeIgnored(_ key: String) {
+        guard !isBusy else { return }
+        do {
+            try settings.setUpdateIgnored(key, ignored: false)
+            ignoredUpdates.removeAll { $0 == key }
+            appendLog("Restored \(Self.displayName(forIgnoreKey: key)); it will appear after the next scan.")
+        } catch {
+            appendLog("Could not remove the ignore rule: \(error.userMessage)", level: .error)
+            isLogVisible = true
+        }
     }
 
     func clearLog() {
@@ -248,16 +326,23 @@ final class AppViewModel {
         operation = .scanning(completed: 0, total: options.count)
         var completed = 0
         var wasCancelled = false
+        let settingsStore = settings
 
         await withTaskGroup(of: SourceOutcome.self) { group in
             for option in options {
                 let source = option.source
+                let cachedContext = option.toolContext ?? settingsStore.cachedContext(for: option.id)
                 group.addTask { [weak self] in
                     await self?.setSourceProbing(source.id)
                     if Task.isCancelled {
                         return SourceOutcome(source: source, result: .cancelled)
                     }
-                    let probe = await source.probe()
+                    let probe: SourceProbe
+                    if let cachedContext {
+                        probe = .available(cachedContext)
+                    } else {
+                        probe = await source.probe()
+                    }
                     if Task.isCancelled {
                         return SourceOutcome(source: source, result: .cancelled)
                     }
@@ -277,6 +362,9 @@ final class AppViewModel {
                         } catch let error as ProcessError where error.isCancellation {
                             return SourceOutcome(source: source, result: .cancelled)
                         } catch {
+                            if cachedContext != nil {
+                                await self?.clearCachedContext(for: source.id)
+                            }
                             return SourceOutcome(source: source, result: .failed(SourceIssue(
                                 kind: .command,
                                 message: error.userMessage,
@@ -320,6 +408,11 @@ final class AppViewModel {
         case .report(let report, let context):
             option.toolContext = context
             option.probeIssue = nil
+            do {
+                try settings.setCachedContext(context, for: option.id)
+            } catch {
+                appendLog("Could not save the \(option.name) tool cache: \(error.userMessage)", level: .warning)
+            }
             replacePackages(for: outcome.source, context: context, with: report.updates)
             if report.issues.isEmpty {
                 option.scanState = .succeeded(updateCount: report.updates.count, completedAt: now)
@@ -345,7 +438,16 @@ final class AppViewModel {
         with infos: [PackageInfo]
     ) {
         packages.removeAll { $0.sourceID == source.id }
-        packages.append(contentsOf: infos.map { PackageUpdate(info: $0, source: source, context: context) })
+        let ignored = settings.ignoredUpdateKeys()
+        let visible = infos.filter { info in
+            !ignored.contains("\(source.id.rawValue):\(info.id)")
+                && !ignored.contains("\(source.id.rawValue):\(info.id)@\(info.availableVersion)")
+        }
+        let hiddenCount = infos.count - visible.count
+        if hiddenCount > 0 {
+            appendLog("\(source.name): \(Self.count(hiddenCount, singular: "update", plural: "updates")) hidden by ignore rules.")
+        }
+        packages.append(contentsOf: visible.map { PackageUpdate(info: $0, source: source, context: context) })
         applySort()
     }
 
@@ -388,6 +490,7 @@ final class AppViewModel {
         var completed = 0
         var cancelled = false
         let sourceOrder = sourceOptions.map(\.id)
+        var verificationBatches: [VerificationBatch] = []
 
         for sourceID in sourceOrder {
             let sourcePackages = selected.filter { $0.sourceID == sourceID }
@@ -445,60 +548,103 @@ final class AppViewModel {
             }
 
             if !verificationPackages.isEmpty {
-                let requests = verificationPackages.map(\.updateRequest)
-                do {
-                    let results = try await source.verify(requests: requests, context: context)
-                    var removeIDs = Set<String>()
-                    for package in verificationPackages {
-                        switch results[package.packageID] {
-                        case .satisfied(let installedVersion):
-                            if let installedVersion { package.currentVersion = installedVersion }
-                            package.isSelected = false
-                            removeIDs.insert(package.id)
-                            summary.updated += 1
-                            appendLog("\(package.name) updated to \(package.currentVersion).", level: .success)
-                        case .stillOutdated(let info):
-                            package.currentVersion = info.currentVersion
-                            package.availableVersion = info.availableVersion
-                            package.status = .failed(.update, "The package is still outdated after the update command completed.")
-                            package.isSelected = true
-                            summary.failed += 1
-                            appendLog("\(package.name) is still outdated after updating.", level: .error)
-                        case nil:
-                            package.status = .failed(.verification, "The source did not return a verification result.")
-                            package.isSelected = true
-                            summary.verificationFailed += 1
-                        }
-                        completed += 1
-                    }
-                    packages.removeAll { removeIDs.contains($0.id) }
-                } catch {
-                    let verificationWasCancelled = error is CancellationError
-                        || (error as? ProcessError)?.isCancellation == true
-                    if verificationWasCancelled {
-                        for package in verificationPackages {
-                            package.status = .failed(
-                                .verification,
-                                "Verification was cancelled after the update command completed. Retry to verify it.")
-                            package.isSelected = true
-                        }
-                        cancelled = true
-                        appendLog("\(source.name): update verification cancelled.", level: .warning)
-                    } else {
-                        for package in verificationPackages {
-                            package.status = .failed(.verification, "The update command completed, but verification failed: \(error.userMessage)")
-                            package.isSelected = true
-                        }
-                        appendLog("\(source.name): update verification failed — \(error.userMessage)", level: .error)
-                    }
-                    summary.verificationFailed += verificationPackages.count
-                    completed += verificationPackages.count
-                }
+                verificationBatches.append(VerificationBatch(
+                    source: source,
+                    context: context,
+                    packages: verificationPackages))
             }
 
             applySort()
             if cancelled { break }
         }
+
+        if !verificationBatches.isEmpty {
+            operation = .updating(current: nil, completed: completed, total: selected.count)
+        }
+        let verificationOutcomes = await withTaskGroup(
+            of: VerificationOutcome.self,
+            returning: [SourceID: VerificationOutcome.Result].self
+        ) { group in
+            for batch in verificationBatches {
+                let source = batch.source
+                let context = batch.context
+                let requests = batch.packages.map(\.updateRequest)
+                group.addTask {
+                    do {
+                        let results = try await source.verify(requests: requests, context: context)
+                        return VerificationOutcome(sourceID: source.id, result: .verified(results))
+                    } catch is CancellationError {
+                        return VerificationOutcome(sourceID: source.id, result: .cancelled)
+                    } catch let error as ProcessError where error.isCancellation {
+                        return VerificationOutcome(sourceID: source.id, result: .cancelled)
+                    } catch {
+                        return VerificationOutcome(sourceID: source.id, result: .failed(error.userMessage))
+                    }
+                }
+            }
+
+            var results: [SourceID: VerificationOutcome.Result] = [:]
+            for await outcome in group { results[outcome.sourceID] = outcome.result }
+            return results
+        }
+
+        var removeIDs = Set<String>()
+        for batch in verificationBatches {
+            let outcome = verificationOutcomes[batch.source.id]
+            for package in batch.packages {
+                switch outcome {
+                case .verified(let results):
+                    switch results[package.packageID] {
+                    case .satisfied(let installedVersion):
+                        if let installedVersion { package.currentVersion = installedVersion }
+                        package.isSelected = false
+                        removeIDs.insert(package.id)
+                        summary.updated += 1
+                        appendLog("\(package.name) updated to \(package.currentVersion).", level: .success)
+                    case .stillOutdated(let info):
+                        package.currentVersion = info.currentVersion
+                        package.availableVersion = info.availableVersion
+                        package.status = .failed(.update, "The package is still outdated after the update command completed.")
+                        package.isSelected = true
+                        summary.failed += 1
+                        appendLog("\(package.name) is still outdated after updating.", level: .error)
+                    case nil:
+                        package.status = .failed(.verification, "The source did not return a verification result.")
+                        package.isSelected = true
+                        summary.verificationFailed += 1
+                    }
+                case .cancelled:
+                    package.status = .failed(
+                        .verification,
+                        "Verification was cancelled after the update command completed. Retry to verify it.")
+                    package.isSelected = true
+                    summary.verificationFailed += 1
+                    cancelled = true
+                case .failed(let message):
+                    package.status = .failed(
+                        .verification,
+                        "The update command completed, but verification failed: \(message)")
+                    package.isSelected = true
+                    summary.verificationFailed += 1
+                case nil:
+                    package.status = .failed(.verification, "The source did not return a verification outcome.")
+                    package.isSelected = true
+                    summary.verificationFailed += 1
+                }
+                completed += 1
+            }
+
+            switch outcome {
+            case .cancelled:
+                appendLog("\(batch.source.name): update verification cancelled.", level: .warning)
+            case .failed(let message):
+                appendLog("\(batch.source.name): update verification failed — \(message)", level: .error)
+            default:
+                break
+            }
+        }
+        packages.removeAll { removeIDs.contains($0.id) }
+        applySort()
 
         updateSummary = summary
         if updateCount == 0 && issueSources.isEmpty {
@@ -528,6 +674,15 @@ final class AppViewModel {
         option.probeIssue = nil
     }
 
+    private func clearCachedContext(for id: SourceID) {
+        sourceOptions.first(where: { $0.id == id })?.toolContext = nil
+        do {
+            try settings.setCachedContext(nil, for: id)
+        } catch {
+            appendLog("Could not clear a stale tool cache: \(error.userMessage)", level: .warning)
+        }
+    }
+
     private func setSourcePhase(_ phase: SourcePhase, for id: SourceID) {
         guard let option = sourceOptions.first(where: { $0.id == id }) else { return }
         let startedAt: Date
@@ -539,7 +694,7 @@ final class AppViewModel {
     }
 
     private func appendOutput(commandID: String, scope: String, event: ProcessOutputEvent) {
-        let trimmed = event.line.trimmed
+        let trimmed = event.line.terminalSanitized.trimmed
         guard !trimmed.isEmpty else { return }
         let key = "\(commandID)|\(event.stream.rawValue)"
         guard lastOutputByCommandAndStream[key] != trimmed else { return }
@@ -560,7 +715,7 @@ final class AppViewModel {
             level: level,
             scope: scope,
             stream: stream,
-            message: message))
+            message: message.terminalSanitized))
         if logEntries.count > Self.maxLogLines {
             logEntries.removeFirst(logEntries.count - Self.maxLogLines)
         }
@@ -568,6 +723,29 @@ final class AppViewModel {
 
     private static func count(_ count: Int, singular: String, plural: String) -> String {
         "\(count) \(count == 1 ? singular : plural)"
+    }
+
+    private static func ignoreKey(for package: PackageUpdate, versionOnly: Bool) -> String {
+        let packageKey = "\(package.sourceID.rawValue):\(package.packageID)"
+        return versionOnly ? "\(packageKey)@\(package.availableVersion)" : packageKey
+    }
+
+    static func displayName(forIgnoreKey key: String) -> String {
+        guard let separator = key.firstIndex(of: ":") else { return key }
+        let source = String(key[..<separator])
+        let package = String(key[key.index(after: separator)...])
+        let sourceName: String
+        switch SourceID(rawValue: source) {
+        case .homebrew: sourceName = "Homebrew"
+        case .homebrewCasks: sourceName = "Homebrew Casks"
+        case .appStore: sourceName = "App Store"
+        case .npm: sourceName = "npm"
+        case .pip: sourceName = "pip"
+        case .pipx: sourceName = "pipx"
+        case .dotnet: sourceName = ".NET Tools"
+        case nil: sourceName = source
+        }
+        return "\(package) (\(sourceName))"
     }
 }
 

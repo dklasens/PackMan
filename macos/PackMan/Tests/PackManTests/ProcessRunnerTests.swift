@@ -3,6 +3,12 @@ import XCTest
 @testable import PackMan
 
 final class ProcessRunnerTests: XCTestCase {
+    func testTerminalSanitizerRemovesAnsiAndControlPictures() {
+        let raw = "\u{001B}[34m==>\u{001B}[0m \u{001B}[1mInstalling\u{001B}[0m\r\u{0008} now"
+        XCTAssertEqual(raw.terminalSanitized, "==> Installing now")
+        XCTAssertEqual("␛[34mBlue␛[0m".terminalSanitized, "Blue")
+    }
+
     func testCapturesBothStreamsAndFlushesPartialLinesBeforeCompletion() async throws {
         let recorder = EventRecorder()
         let result = try await ProcessRunner.shared.run(

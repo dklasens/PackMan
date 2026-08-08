@@ -3,13 +3,16 @@ import Foundation
 struct MasSource: PackageSource {
     let runner: any ProcessRunning
     let resolver: any ToolResolving
+    let verificationDelay: Duration
 
     init(
         runner: any ProcessRunning = ProcessRunner.shared,
-        resolver: any ToolResolving = ToolResolver.shared
+        resolver: any ToolResolving = ToolResolver.shared,
+        verificationDelay: Duration = .seconds(8)
     ) {
         self.runner = runner
         self.resolver = resolver
+        self.verificationDelay = verificationDelay
     }
 
     let descriptor = SourceDescriptor(
@@ -21,39 +24,57 @@ struct MasSource: PackageSource {
         installationURL: URL(string: "https://github.com/mas-cli/mas"))
 
     func probe() async -> SourceProbe {
-        await SourceSupport.probe(
+        let probe = await SourceSupport.probe(
             descriptor: descriptor,
             versionArguments: ["version"],
             resolver: resolver,
             runner: runner)
+        guard case .available(let context) = probe else { return probe }
+        if let issue = MasVersionGate.issueIfUnsupported(context.version) {
+            return .unavailable(issue)
+        }
+        return .available(context)
     }
 
     func scan(
         context: ToolContext,
         progress: @escaping @Sendable (SourcePhase) async -> Void
     ) async throws -> SourceScanReport {
+        if let issue = MasVersionGate.issueIfUnsupported(context.version) {
+            throw SourceError.commandFailed(issue.message)
+        }
         await progress(.scanning)
         let result = try await runner.run(
             context.executablePath,
             ["outdated"],
-            timeout: 120,
+            timeout: 180,
             environment: SourceSupport.environment(pathEntries: context.pathEntries))
         guard result.succeeded else { throw SourceSupport.commandFailure("mas outdated", result: result) }
 
         var updates: [PackageInfo] = []
         var rejected = 0
         for line in result.stdout.split(separator: "\n", omittingEmptySubsequences: true) {
-            if let update = MasOutdatedParser.parse(String(line)) {
+            if let update = MasOutdatedParser.parseLine(String(line)) {
                 updates.append(update)
             } else {
                 rejected += 1
             }
         }
-        let issues = rejected == 0 ? [] : [SourceIssue(
-            kind: .parsing,
-            message: "Could not parse \(rejected) App Store update record(s).",
-            recovery: "Run mas outdated in Terminal and inspect its output.")]
+        var issues: [SourceIssue] = []
+        if rejected > 0 {
+            issues.append(SourceIssue(
+                kind: .parsing,
+                message: "Could not parse \(rejected) App Store update record(s).",
+                recovery: "Run mas outdated in Terminal and inspect its output."))
+        }
+        if let indexingIssue = MasIndexingWarningParser.issue(fromStderr: result.stderr) {
+            issues.append(indexingIssue)
+        }
         return SourceScanReport(updates: updates, issues: issues)
+    }
+
+    static func terminalUpdateCommand(forADAMID id: String) -> String {
+        "sudo mas update --force \(id)"
     }
 
     func update(
@@ -64,19 +85,98 @@ struct MasSource: PackageSource {
         guard PackageIdValidator.isAllDigits(request.packageID) else {
             throw SourceError.invalidPackageId(request.packageID)
         }
-        let result = try await runner.run(
-            context.executablePath,
-            ["upgrade", request.packageID],
-            timeout: 900,
-            environment: SourceSupport.environment(pathEntries: context.pathEntries),
-            onOutput: onOutput)
-        guard result.succeeded else { throw SourceSupport.commandFailure("mas upgrade", result: result) }
+        if let issue = MasVersionGate.issueIfUnsupported(context.version) {
+            throw SourceError.commandFailed(issue.message)
+        }
+        // App Store commerce (CommerceKit) only answers inside the user's
+        // logged-in GUI session: processes elevated through authorization
+        // services hang at the purchase step (mas-cli/mas#128), and unprivileged
+        // mas re-executes itself via sudo, which a GUI app cannot answer.
+        // Hand the install to the one elevation path that reliably works.
+        let command = Self.terminalUpdateCommand(forADAMID: request.packageID)
+        await onOutput(ProcessOutputEvent(stream: .stdout, line: command))
+        throw SourceError.requiresTerminalUpdate(command)
+    }
+
+    func verify(
+        requests: [UpdateRequest],
+        context: ToolContext
+    ) async throws -> [String: UpdateVerification] {
+        if verificationDelay > .zero {
+            try await Task.sleep(for: verificationDelay)
+        }
+        try Task.checkCancellation()
+        // Spotlight re-indexing of the freshly installed app can lag behind the
+        // update, so tolerate partial-scan issues here instead of failing the
+        // verification outright; a still-outdated listing remains retryable.
+        let report = try await scan(context: context) { _ in }
+        let updates = Dictionary(uniqueKeysWithValues: report.updates.map { ($0.id, $0) })
+        return Dictionary(uniqueKeysWithValues: requests.map { request in
+            if let update = updates[request.packageID] {
+                return (request.packageID, .stillOutdated(update))
+            }
+            return (request.packageID, .satisfied(installedVersion: request.targetVersion))
+        })
+    }
+
+    static func appStorePageURL(forADAMID id: String) -> URL? {
+        URL(string: "macappstore://apps.apple.com/app/id\(id)")
+    }
+}
+
+enum MasVersionGate {
+    static let minimumMajorVersion = 4
+
+    static func issueIfUnsupported(_ version: String) -> SourceIssue? {
+        guard let major = majorVersion(of: version), major < minimumMajorVersion else { return nil }
+        return SourceIssue(
+            kind: .configuration,
+            message: "mas \(version.trimmed) is too old; App Store support requires mas \(minimumMajorVersion).0 or newer.",
+            recovery: "Run `brew upgrade mas` in Terminal, then retry.")
+    }
+
+    static func majorVersion(of version: String) -> Int? {
+        let trimmed = version.trimmed
+        let token = trimmed.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? trimmed
+        let component = token.split(separator: ".").first.map(String.init) ?? token
+        return Int(component)
+    }
+}
+
+enum MasIndexingWarningParser {
+    private static let marker = "not indexed in Spotlight in "
+
+    static func issue(fromStderr stderr: String) -> SourceIssue? {
+        var paths: [String] = []
+        for line in stderr.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard let range = line.range(of: marker) else { continue }
+            let path = String(line[range.upperBound...]).trimmed
+            guard !path.isEmpty, !paths.contains(path) else { continue }
+            paths.append(path)
+        }
+        guard !paths.isEmpty else { return nil }
+        let names = paths.map { URL(fileURLWithPath: $0).lastPathComponent }
+        let listed = names.prefix(5).joined(separator: ", ")
+        let suffix = names.count > 5 ? ", and \(names.count - 5) more" : ""
+        return SourceIssue(
+            kind: .configuration,
+            message: "\(names.count) App Store app(s) are not indexed in Spotlight and were skipped: \(listed)\(suffix). mas started indexing them.",
+            recovery: "Scan again shortly. If apps remain missing, run `sudo mdutil -Eai on` in Terminal to rebuild the Spotlight index.")
     }
 }
 
 enum MasOutdatedParser {
     // 497799835 Xcode (16.4 -> 16.5)
     private static let pattern = try! NSRegularExpression(pattern: "^(\\d+)\\s+(.+?)\\s+\\((.+?)\\s*->\\s*(.+?)\\)\\s*$")
+
+    /// Accepts both the tabular rows produced by mas's shell wrapper and the
+    /// JSON-lines emitted by the raw mas binary (mas 7+).
+    static func parseLine(_ text: String) -> PackageInfo? {
+        let trimmed = text.trimmed
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.hasPrefix("{"), let record = parseJSON(trimmed) { return record }
+        return parse(trimmed)
+    }
 
     static func parse(_ text: String) -> PackageInfo? {
         let range = NSRange(text.startIndex..., in: text)
@@ -95,5 +195,47 @@ enum MasOutdatedParser {
             name: String(text[nameRange]),
             currentVersion: String(text[currentRange]),
             availableVersion: String(text[availableRange]))
+    }
+
+    static func parseJSON(_ text: String) -> PackageInfo? {
+        guard let data = text.data(using: .utf8),
+              let record = try? JSONDecoder().decode(MasOutdatedRecord.self, from: data) else {
+            return nil
+        }
+        return record.packageInfo
+    }
+}
+
+struct MasOutdatedRecord: Decodable {
+    let adamID: String
+    let name: String
+    let version: String
+    let newVersion: String
+
+    private enum CodingKeys: String, CodingKey {
+        case adamID, name, version, newVersion
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let numeric = try? container.decode(Int.self, forKey: .adamID) {
+            adamID = String(numeric)
+        } else {
+            adamID = try container.decode(String.self, forKey: .adamID)
+        }
+        name = try container.decode(String.self, forKey: .name)
+        version = try container.decode(String.self, forKey: .version)
+        newVersion = try container.decode(String.self, forKey: .newVersion)
+    }
+
+    var packageInfo: PackageInfo? {
+        guard PackageIdValidator.isAllDigits(adamID),
+              !name.trimmed.isEmpty,
+              PackageIdValidator.isValidVersion(newVersion) else { return nil }
+        return PackageInfo(
+            id: adamID,
+            name: name,
+            currentVersion: version,
+            availableVersion: newVersion)
     }
 }

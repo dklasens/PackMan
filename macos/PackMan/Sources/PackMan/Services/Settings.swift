@@ -7,6 +7,10 @@ protocol SettingsStoring: Sendable {
     func setSource(_ id: SourceID, enabled: Bool) throws
     func executableOverride(for toolID: ToolID) -> String?
     func setExecutableOverride(_ path: String?, for toolID: ToolID) throws
+    func cachedContext(for sourceID: SourceID) -> ToolContext?
+    func setCachedContext(_ context: ToolContext?, for sourceID: SourceID) throws
+    func ignoredUpdateKeys() -> Set<String>
+    func setUpdateIgnored(_ key: String, ignored: Bool) throws
 }
 
 final class SettingsStore: SettingsStoring, @unchecked Sendable {
@@ -16,6 +20,30 @@ final class SettingsStore: SettingsStoring, @unchecked Sendable {
         var version: Int
         var disabledSources: [String]
         var executableOverrides: [String: String]
+        var cachedContexts: [String: CachedToolContext]?
+        var ignoredUpdates: [String]?
+    }
+
+    private struct CachedToolContext: Codable {
+        let executablePath: String
+        let version: String
+        let pathEntries: [String]
+        let origin: ToolResolutionOrigin
+
+        init(_ context: ToolContext) {
+            executablePath = context.executablePath
+            version = context.version
+            pathEntries = context.pathEntries
+            origin = context.origin
+        }
+
+        var context: ToolContext {
+            ToolContext(
+                executablePath: executablePath,
+                version: version,
+                pathEntries: pathEntries,
+                origin: origin)
+        }
     }
 
     private struct LegacySettingsData: Decodable {
@@ -29,7 +57,12 @@ final class SettingsStore: SettingsStoring, @unchecked Sendable {
 
     init(settingsURL: URL? = nil) {
         self.settingsURL = settingsURL ?? Self.defaultURL
-        data = SettingsData(version: 2, disabledSources: [], executableOverrides: [:])
+        data = SettingsData(
+            version: 3,
+            disabledSources: [],
+            executableOverrides: [:],
+            cachedContexts: [:],
+            ignoredUpdates: [])
         loadFromDisk()
     }
 
@@ -64,12 +97,52 @@ final class SettingsStore: SettingsStoring, @unchecked Sendable {
         }
     }
 
+    func cachedContext(for sourceID: SourceID) -> ToolContext? {
+        lock.withLock {
+            guard let cached = data.cachedContexts?[sourceID.rawValue],
+                  FileManager.default.isExecutableFile(atPath: cached.executablePath) else {
+                return nil
+            }
+            return cached.context
+        }
+    }
+
+    func setCachedContext(_ context: ToolContext?, for sourceID: SourceID) throws {
+        try lock.withLock {
+            var contexts = data.cachedContexts ?? [:]
+            if let context {
+                contexts[sourceID.rawValue] = CachedToolContext(context)
+            } else {
+                contexts.removeValue(forKey: sourceID.rawValue)
+            }
+            data.cachedContexts = contexts
+            try saveLocked()
+        }
+    }
+
+    func ignoredUpdateKeys() -> Set<String> {
+        lock.withLock { Set(data.ignoredUpdates ?? []) }
+    }
+
+    func setUpdateIgnored(_ key: String, ignored: Bool) throws {
+        try lock.withLock {
+            var keys = Set(data.ignoredUpdates ?? [])
+            if ignored { keys.insert(key) } else { keys.remove(key) }
+            data.ignoredUpdates = keys.sorted()
+            try saveLocked()
+        }
+    }
+
     private func loadFromDisk() {
         guard FileManager.default.fileExists(atPath: settingsURL.path) else { return }
+        Self.restrictPermissions(at: settingsURL)
         do {
             let raw = try Data(contentsOf: settingsURL)
             let decoder = JSONDecoder()
-            if let current = try? decoder.decode(SettingsData.self, from: raw), current.version == 2 {
+            if var current = try? decoder.decode(SettingsData.self, from: raw), current.version >= 2 {
+                current.version = 3
+                current.cachedContexts = current.cachedContexts ?? [:]
+                current.ignoredUpdates = current.ignoredUpdates ?? []
                 data = current
                 return
             }
@@ -89,7 +162,18 @@ final class SettingsStore: SettingsStoring, @unchecked Sendable {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(data).write(to: settingsURL, options: .atomic)
+        Self.restrictPermissions(at: settingsURL)
         loadIssue = nil
+    }
+
+    /// Settings can contain executable overrides that PackMan runs with
+    /// administrator privileges, so keep them private to the current user.
+    private static func restrictPermissions(at url: URL) {
+        let fileManager = FileManager.default
+        guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+              let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue,
+              permissions & 0o077 != 0 else { return }
+        try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     private static var defaultURL: URL {
@@ -108,6 +192,7 @@ final class SettingsStore: SettingsStoring, @unchecked Sendable {
         case "npm": return .npm
         case "pip": return .pip
         case "pipx": return .pipx
+        case ".net tools", "dotnet": return .dotnet
         default: return nil
         }
     }

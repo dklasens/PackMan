@@ -31,6 +31,16 @@ enum SourceScanState: Sendable, Equatable {
         default: return []
         }
     }
+
+    var completedAt: Date? {
+        switch self {
+        case .succeeded(_, let date), .partial(_, _, let date), .unavailable(_, let date),
+             .failed(_, let date), .cancelled(let date):
+            return date
+        default:
+            return nil
+        }
+    }
 }
 
 enum AppOperation: Sendable, Equatable {

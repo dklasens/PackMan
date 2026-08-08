@@ -15,6 +15,13 @@ struct PackManApp: App {
         }
         .defaultSize(width: 1_020, height: 680)
         .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("Sources…") {
+                    viewModel.isSourcesSheetPresented = true
+                }
+                .keyboardShortcut(",", modifiers: .command)
+            }
+
             CommandMenu("Packages") {
                 Button(viewModel.isBusy ? "Cancel Operation" : "Scan for Updates") {
                     viewModel.isBusy ? viewModel.cancelOperation() : viewModel.startScan()

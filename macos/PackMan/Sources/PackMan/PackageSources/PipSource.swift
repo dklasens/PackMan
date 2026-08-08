@@ -1,6 +1,28 @@
 import Foundation
 
 struct PipSource: PackageSource {
+    static let findDependentsScript = #"""
+import importlib.metadata as metadata
+import json
+import re
+import sys
+
+normalize = lambda value: re.sub(r"[-_.]+", "-", value).lower()
+target = normalize(sys.argv[1])
+dependents = {}
+for distribution in metadata.distributions():
+    name = distribution.metadata.get("Name")
+    version = distribution.version
+    if not name or not version or normalize(name) == target:
+        continue
+    for requirement in distribution.requires or ():
+        match = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", requirement)
+        if match and normalize(match.group(1)) == target:
+            dependents.setdefault(normalize(name), {"name": name, "version": version})
+            break
+print(json.dumps(list(dependents.values()), ensure_ascii=True))
+"""#
+
     let runner: any ProcessRunning
     let resolver: any ToolResolving
 
@@ -81,20 +103,68 @@ struct PipSource: PackageSource {
         guard PackageIdValidator.isValid(request.packageID) else {
             throw SourceError.invalidPackageId(request.packageID)
         }
+        guard PackageIdValidator.isValidVersion(request.targetVersion) else {
+            throw SourceError.invalidTargetVersion(request.targetVersion)
+        }
+        let dependents = try await findInstalledDependents(
+            of: request.packageID,
+            context: context)
+        let requirements = ["\(request.packageID)==\(request.targetVersion)"]
+            + dependents.map { "\($0.name)==\($0.version)" }
         let result = try await runner.run(
             context.executablePath,
-            ["-m", "pip", "install", "--upgrade", request.packageID],
+            ["-m", "pip", "install", "--upgrade"] + requirements,
             timeout: 600,
             environment: SourceSupport.environment(pathEntries: context.pathEntries),
             onOutput: onOutput)
+        if !result.succeeded,
+           result.stderr.localizedCaseInsensitiveContains("ResolutionImpossible"),
+           !dependents.isEmpty {
+            let names = dependents.map { "\($0.name) \($0.version)" }.joined(separator: ", ")
+            throw SourceError.commandFailed(
+                "pip blocked \(request.packageID) \(request.targetVersion) because it conflicts with installed dependent package(s): \(names). No packages were changed; review the command log for the constraints.")
+        }
         guard result.succeeded else { throw SourceError.commandFailed(Self.friendlyFailure("pip install", result)) }
+    }
+
+    private func findInstalledDependents(
+        of packageID: String,
+        context: ToolContext
+    ) async throws -> [PipDependent] {
+        let result = try await runner.run(
+            context.executablePath,
+            ["-c", Self.findDependentsScript, packageID],
+            timeout: 30,
+            environment: SourceSupport.environment(pathEntries: context.pathEntries))
+        guard result.succeeded else {
+            throw SourceError.commandFailed(
+                "Could not inspect installed pip dependencies, so the update was not attempted: \(Self.friendlyFailure("python", result))")
+        }
+        do {
+            let dependents = result.stdout.trimmed.isEmpty
+                ? []
+                : try JSONDecoder().decode([PipDependent].self, from: Data(result.stdout.utf8))
+            guard dependents.allSatisfy({
+                PackageIdValidator.isValid($0.name) && PackageIdValidator.isValidVersion($0.version)
+            }) else {
+                throw SourceError.commandFailed(
+                    "Installed pip dependency metadata contained an invalid name or version, so the update was not attempted.")
+            }
+            return dependents
+        } catch let error as SourceError {
+            throw error
+        } catch {
+            throw SourceError.commandFailed(
+                "Could not read installed pip dependencies, so the update was not attempted: \(error.decodingDescription)")
+        }
     }
 
     private static func friendlyFailure(_ command: String, _ result: ProcessResult) -> String {
         if result.stderr.contains("externally-managed-environment") {
             return "\(command) refused: this Python is externally managed (PEP 668). Install the tool with pipx instead."
         }
-        let detail = [result.stderr.trimmed, result.stdout.trimmed].first { !$0.isEmpty } ?? "No diagnostic output."
+        let detail = [result.stderr.terminalSanitized.trimmed, result.stdout.terminalSanitized.trimmed]
+            .first { !$0.isEmpty } ?? "No diagnostic output."
         return "\(command) failed (exit \(result.exitCode)): \(detail)"
     }
 }
@@ -103,4 +173,9 @@ struct PipOutdatedEntry: Decodable {
     let name: String
     let version: String?
     let latestVersion: String?
+}
+
+private struct PipDependent: Decodable {
+    let name: String
+    let version: String
 }

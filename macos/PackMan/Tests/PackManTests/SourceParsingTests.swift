@@ -19,6 +19,193 @@ final class SourceParsingTests: XCTestCase {
         XCTAssertNil(MasOutdatedParser.parse("not a mas record"))
     }
 
+    func testMasParserAcceptsColumnAlignedTabularLine() {
+        let parsed = MasOutdatedParser.parseLine("6445813049  Spark Desktop  (3.30.4 -> 3.30.5)")
+        XCTAssertEqual(parsed?.id, "6445813049")
+        XCTAssertEqual(parsed?.name, "Spark Desktop")
+        XCTAssertEqual(parsed?.currentVersion, "3.30.4")
+        XCTAssertEqual(parsed?.availableVersion, "3.30.5")
+    }
+
+    func testMasParserAcceptsJsonLineFromRawMasBinary() {
+        let line = #"{"adamID":6445813049,"bundleID":"com.readdle.SparkDesktop.appstore","fileSystemSize":877424036,"name":"Spark Desktop","newVersion":"3.30.5","path":"/Applications/Spark Desktop.app","version":"3.30.4"}"#
+        let parsed = MasOutdatedParser.parseLine(line)
+        XCTAssertEqual(parsed?.id, "6445813049")
+        XCTAssertEqual(parsed?.name, "Spark Desktop")
+        XCTAssertEqual(parsed?.currentVersion, "3.30.4")
+        XCTAssertEqual(parsed?.availableVersion, "3.30.5")
+    }
+
+    func testMasParserRejectsJsonLineWithInvalidNewVersion() {
+        let line = #"{"adamID":123,"name":"App","newVersion":"","version":"1.0"}"#
+        XCTAssertNil(MasOutdatedParser.parseLine(line))
+    }
+
+    func testMasVersionGateRejectsLegacyMas() {
+        XCTAssertNotNil(MasVersionGate.issueIfUnsupported("1.8.7"))
+        XCTAssertNil(MasVersionGate.issueIfUnsupported("4.1.2"))
+        XCTAssertNil(MasVersionGate.issueIfUnsupported("7.0.0"))
+        XCTAssertNil(MasVersionGate.issueIfUnsupported("built from source"))
+    }
+
+    func testMasProbeRejectsLegacyVersion() async {
+        let runner = StubProcessRunner()
+        await runner.enqueueAny(
+            stub: .init(result: ProcessResult(exitCode: 0, stdout: "1.8.7\n", stderr: "")))
+        let source = MasSource(
+            runner: runner,
+            resolver: StubResolver(resolution: .resolved(ResolvedExecutable(
+                path: "/test/mas",
+                pathEntries: ["/test"],
+                origin: .knownPath))))
+        let probe = await source.probe()
+        guard case .unavailable(let issue) = probe else {
+            return XCTFail("Expected legacy mas to be unavailable")
+        }
+        XCTAssertTrue(issue.message.contains("too old"))
+        XCTAssertEqual(issue.recovery, "Run `brew upgrade mas` in Terminal, then retry.")
+    }
+
+    func testMasScanRejectsLegacyVersionFromCachedContext() async {
+        let source = MasSource(runner: StubProcessRunner(), resolver: StubResolver(resolution: .notFound))
+        let context = masToolContext(executablePath: "/test/mas", version: "1.8.7")
+        do {
+            _ = try await source.scan(context: context) { _ in }
+            XCTFail("Expected scan to refuse legacy mas")
+        } catch let error as SourceError {
+            XCTAssertTrue(error.errorDescription?.contains("too old") == true)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testMasScanSurfacesSpotlightIndexingWarnings() async throws {
+        let runner = StubProcessRunner()
+        let stderr = """
+        Warning: Found a likely App Store app that is not indexed in Spotlight in /Applications/Speedtest.app
+
+                 Indexing now; will likely complete sometime after mas exits
+
+                 Disable auto-indexing via: export MAS_NO_AUTO_INDEX=1
+        Warning: Found a likely App Store app that is not indexed in Spotlight in /Applications/Bitwarden.app
+        """
+        await runner.enqueue(
+            arguments: ["outdated"],
+            stub: .init(result: ProcessResult(
+                exitCode: 0,
+                stdout: "6445813049  Spark Desktop  (3.30.4 -> 3.30.5)\n",
+                stderr: stderr)))
+        let source = MasSource(runner: runner, resolver: StubResolver(resolution: .notFound))
+        let report = try await source.scan(context: masToolContext(executablePath: "/test/mas")) { _ in }
+        XCTAssertEqual(report.updates.count, 1)
+        let issue = try XCTUnwrap(report.issues.first)
+        XCTAssertTrue(issue.message.contains("2 App Store app(s)"))
+        XCTAssertTrue(issue.message.contains("Speedtest.app"))
+        XCTAssertTrue(issue.message.contains("Bitwarden.app"))
+        XCTAssertTrue(issue.recovery?.contains("mdutil") == true)
+    }
+
+    func testMasVerifyToleratesIndexingIssuesAfterUpdate() async throws {
+        let runner = StubProcessRunner()
+        await runner.enqueue(
+            arguments: ["outdated"],
+            stub: .init(result: ProcessResult(
+                exitCode: 0,
+                stdout: "",
+                stderr: "Warning: Found a likely App Store app that is not indexed in Spotlight in /Applications/Speedtest.app")))
+        let source = MasSource(
+            runner: runner,
+            resolver: StubResolver(resolution: .notFound),
+            verificationDelay: .zero)
+        let verification = try await source.verify(
+            requests: [UpdateRequest(packageID: "6445813049", name: "Spark Desktop", targetVersion: "3.30.5")],
+            context: masToolContext(executablePath: "/test/mas"))
+        guard case .satisfied(let installed) = verification["6445813049"] else {
+            return XCTFail("Expected satisfied verification")
+        }
+        XCTAssertEqual(installed, "3.30.5")
+    }
+
+    func testMasVerifyReportsStillOutdatedWhenAppRemainsListed() async throws {
+        let runner = StubProcessRunner()
+        await runner.enqueue(
+            arguments: ["outdated"],
+            stub: .init(result: ProcessResult(
+                exitCode: 0,
+                stdout: "6445813049  Spark Desktop  (3.30.4 -> 3.30.5)\n",
+                stderr: "")))
+        let source = MasSource(
+            runner: runner,
+            resolver: StubResolver(resolution: .notFound),
+            verificationDelay: .zero)
+        let verification = try await source.verify(
+            requests: [UpdateRequest(packageID: "6445813049", name: "Spark Desktop", targetVersion: "3.30.5")],
+            context: masToolContext(executablePath: "/test/mas"))
+        guard case .stillOutdated(let info) = verification["6445813049"] else {
+            return XCTFail("Expected still-outdated verification")
+        }
+        XCTAssertEqual(info.currentVersion, "3.30.4")
+    }
+
+    func testLiveMasScanAgainstRealMasIfEnabled() async throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["PACKMAN_LIVE_MAS_TESTS"] == "1",
+            "Set PACKMAN_LIVE_MAS_TESTS=1 to run live mas integration tests.")
+        let source = MasSource(verificationDelay: .zero)
+        let probe = await source.probe()
+        guard case .available(let context) = probe else {
+            return XCTFail("mas is not available on this machine: \(probe)")
+        }
+        print("LIVE mas probe: \(context.executablePath) (\(context.version), \(context.origin.rawValue))")
+        let report = try await source.scan(context: context) { _ in }
+        print("LIVE mas scan: \(report.updates.count) update(s), \(report.issues.count) issue(s)")
+        for update in report.updates {
+            print("  update: \(update.id) \(update.name) \(update.currentVersion) -> \(update.availableVersion)")
+        }
+        for issue in report.issues {
+            print("  issue: \(issue.message)")
+        }
+        XCTAssertTrue(report.updates.allSatisfy { PackageIdValidator.isAllDigits($0.id) })
+    }
+
+    func testMasUpdateHandsOffToTerminalElevation() async throws {
+        let runner = StubProcessRunner()
+        let source = MasSource(runner: runner, resolver: StubResolver(resolution: .notFound))
+        var streamed: [String] = []
+
+        do {
+            try await source.update(
+                request: UpdateRequest(packageID: "6445813049", name: "Spark Desktop", targetVersion: "3.30.5"),
+                context: masToolContext(executablePath: "/opt/homebrew/bin/mas")) { event in
+                    streamed.append(event.line)
+                }
+            XCTFail("Expected requiresTerminalUpdate")
+        } catch let error as SourceError {
+            guard case .requiresTerminalUpdate(let command) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(command, "sudo mas update --force 6445813049")
+            XCTAssertTrue(error.errorDescription?.contains("sudo mas update --force 6445813049") == true)
+            XCTAssertTrue(error.errorDescription?.contains("logged-in session") == true)
+        }
+
+        XCTAssertEqual(streamed, ["sudo mas update --force 6445813049"])
+        let invocations = await runner.invocations
+        XCTAssertTrue(invocations.isEmpty, "No process may be launched for the handoff")
+    }
+
+    func testMasUpdateRejectsInvalidPackageIdBeforeHandoff() async throws {
+        let source = MasSource(runner: StubProcessRunner(), resolver: StubResolver(resolution: .notFound))
+        do {
+            try await source.update(
+                request: UpdateRequest(packageID: "not-an-id", name: "Bad", targetVersion: "1.0"),
+                context: masToolContext(executablePath: "/opt/homebrew/bin/mas")) { _ in }
+            XCTFail("Expected invalidPackageId")
+        } catch let error as SourceError {
+            guard case .invalidPackageId = error else { return XCTFail("Unexpected error: \(error)") }
+        }
+    }
+
     func testNpmUsesLatestRatherThanWanted() async throws {
         let runner = StubProcessRunner()
         let json = String(data: try fixtureData("npm-outdated"), encoding: .utf8)!
@@ -30,6 +217,31 @@ final class SourceParsingTests: XCTestCase {
         XCTAssertEqual(report.updates.first(where: { $0.id == "typescript" })?.currentVersion, "5.4.0")
         XCTAssertEqual(report.updates.first(where: { $0.id == "typescript" })?.availableVersion, "6.0.1")
         XCTAssertTrue(report.issues.isEmpty)
+    }
+
+    func testNpmVerifyConfirmsAllRequestsInOneCall() async throws {
+        let runner = StubProcessRunner()
+        let json = #"{"dependencies":{"a":{"version":"2.0.0"},"b":{"version":"1.0.0"}}}"#
+        await runner.enqueue(
+            arguments: ["list", "-g", "--depth=0", "--json"],
+            stub: .init(result: ProcessResult(exitCode: 0, stdout: json, stderr: "")))
+        let source = NpmSource(runner: runner, resolver: StubResolver(resolution: .notFound))
+        let verification = try await source.verify(
+            requests: [
+                UpdateRequest(packageID: "a", name: "a", targetVersion: "2.0.0"),
+                UpdateRequest(packageID: "b", name: "b", targetVersion: "2.0.0"),
+            ],
+            context: testToolContext)
+        guard case .satisfied(let installed) = verification["a"] else {
+            return XCTFail("Expected a to be satisfied")
+        }
+        XCTAssertEqual(installed, "2.0.0")
+        guard case .stillOutdated(let info) = verification["b"] else {
+            return XCTFail("Expected b to be still outdated")
+        }
+        XCTAssertEqual(info.currentVersion, "1.0.0")
+        let invocations = await runner.invocations
+        XCTAssertEqual(invocations.count, 1, "Verification must batch all packages into one npm call")
     }
 
     func testNpmInstallsExactDisplayedTarget() async throws {
@@ -57,6 +269,60 @@ final class SourceParsingTests: XCTestCase {
         XCTAssertTrue(report.issues.isEmpty)
     }
 
+    func testPipPinsTargetAndInstalledDependentsInOneTransaction() async throws {
+        let runner = StubProcessRunner()
+        await runner.enqueue(
+            arguments: ["-c", PipSource.findDependentsScript, "urllib3"],
+            stub: .init(result: ProcessResult(
+                exitCode: 0,
+                stdout: #"[{"name":"requests","version":"2.32.4"}]"#,
+                stderr: "")))
+        await runner.enqueue(
+            arguments: ["-m", "pip", "install", "--upgrade", "urllib3==2.6.0", "requests==2.32.4"],
+            stub: .init(result: ProcessResult(exitCode: 0, stdout: "updated", stderr: "")))
+        let source = PipSource(runner: runner, resolver: StubResolver(resolution: .notFound))
+
+        try await source.update(
+            request: UpdateRequest(packageID: "urllib3", name: "urllib3", targetVersion: "2.6.0"),
+            context: testToolContext) { _ in }
+
+        let invocations = await runner.invocations
+        XCTAssertEqual(
+            invocations.last?.arguments,
+            ["-m", "pip", "install", "--upgrade", "urllib3==2.6.0", "requests==2.32.4"])
+    }
+
+    func testDotnetParserAndNuGetLookupFindUpdate() async throws {
+        let output = """
+        Package Id      Version      Commands
+        -------------------------------------
+        dotnet-ef       8.0.0        dotnet-ef
+        """
+        let parsed = DotnetToolListParser.parse(output)
+        XCTAssertEqual(parsed.tools, [.init(id: "dotnet-ef", version: "8.0.0")])
+        XCTAssertTrue(parsed.issues.isEmpty)
+
+        let runner = StubProcessRunner()
+        await runner.enqueue(
+            arguments: ["tool", "list", "--global"],
+            stub: .init(result: ProcessResult(exitCode: 0, stdout: output, stderr: "")))
+        let client = StaticHTTPClient(
+            statusCode: 200,
+            body: #"{"versions":["8.0.0","9.0.2","10.0.0-preview.1"]}"#)
+        let source = DotnetSource(
+            runner: runner,
+            resolver: StubResolver(resolution: .notFound),
+            httpClient: client)
+
+        let report = try await source.scan(context: testToolContext) { _ in }
+        XCTAssertEqual(report.updates, [PackageInfo(
+            id: "dotnet-ef",
+            name: "dotnet-ef",
+            currentVersion: "8.0.0",
+            availableVersion: "9.0.2")])
+        XCTAssertTrue(report.issues.isEmpty)
+    }
+
     func testPipxNativePartialOutputKeepsUpdatesAndIssues() async throws {
         let runner = StubProcessRunner()
         await runner.enqueue(
@@ -78,8 +344,25 @@ final class SourceParsingTests: XCTestCase {
     }
 }
 
+private func masToolContext(executablePath: String, version: String = "7.0.0") -> ToolContext {
+    ToolContext(
+        executablePath: executablePath,
+        version: version,
+        pathEntries: ["/test"],
+        origin: .knownPath)
+}
+
 private struct StubHTTPClient: HTTPDataLoading {
     func data(for request: URLRequest) async throws -> HTTPDataResponse {
         throw URLError(.notConnectedToInternet)
+    }
+}
+
+private struct StaticHTTPClient: HTTPDataLoading {
+    let statusCode: Int
+    let body: String
+
+    func data(for request: URLRequest) async throws -> HTTPDataResponse {
+        HTTPDataResponse(data: Data(body.utf8), statusCode: statusCode)
     }
 }

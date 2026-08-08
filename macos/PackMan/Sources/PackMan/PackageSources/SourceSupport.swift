@@ -37,7 +37,8 @@ enum SourceSupport {
                 timeout: 15,
                 environment: contextEnvironment)
             guard result.succeeded else {
-                let detail = [result.stderr.trimmed, result.stdout.trimmed].first { !$0.isEmpty } ?? "exit \(result.exitCode)"
+                let detail = [result.stderr.terminalSanitized.trimmed, result.stdout.terminalSanitized.trimmed]
+                    .first { !$0.isEmpty } ?? "exit \(result.exitCode)"
                 return .unavailable(SourceIssue(
                     kind: .unavailable,
                     message: "\(descriptor.name) could not be used: \(detail)",
@@ -67,13 +68,21 @@ enum SourceSupport {
     static func environment(pathEntries: [String], additions: [String: String] = [:]) -> [String: String] {
         let inherited = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
         let paths = unique(pathEntries + ProcessRunner.standardSearchPaths)
-        var environment = additions
+        var environment = [
+            "NO_COLOR": "1",
+            "CLICOLOR": "0",
+            "CLICOLOR_FORCE": "0",
+            "TERM": "dumb",
+            "HOMEBREW_NO_COLOR": "1",
+        ]
+        for (key, value) in additions { environment[key] = value }
         environment["PATH"] = paths.joined(separator: ":") + ":" + inherited
         return environment
     }
 
     static func commandFailure(_ command: String, result: ProcessResult) -> SourceError {
-        let detail = [result.stderr.trimmed, result.stdout.trimmed].first { !$0.isEmpty } ?? "No diagnostic output."
+        let detail = [result.stderr.terminalSanitized.trimmed, result.stdout.terminalSanitized.trimmed]
+            .first { !$0.isEmpty } ?? "No diagnostic output."
         return .commandFailed("\(command) failed (exit \(result.exitCode)): \(detail)")
     }
 
