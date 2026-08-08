@@ -30,6 +30,18 @@ public sealed class ScoopSource(IToolResolver resolver, IProcessRunner runner) :
         catch (Exception ex) when (ex is not OperationCanceledException) { return probe; }
     }
 
+    public override bool SupportsCacheClear => true;
+
+    public override async Task<string> ClearCacheAsync(ToolContext context,
+        IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
+    {
+        var result = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
+            Arguments(context, "cache", "rm", "--all"), context.Environment, TimeSpan.FromMinutes(2)),
+            output, cancellationToken);
+        if (!result.Success) throw SourceSupport.CommandFailure("scoop cache rm", result);
+        return "Cleared the Scoop download cache.";
+    }
+
     public override async Task<SourceScanReport> ScanAsync(ToolContext context,
         IProgress<SourcePhase>? progress = null, CancellationToken cancellationToken = default)
     {

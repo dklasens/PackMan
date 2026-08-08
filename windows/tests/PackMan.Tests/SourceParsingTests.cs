@@ -287,7 +287,7 @@ public sealed class SourceParsingTests
     }
 
     [Fact]
-    public async Task WingetInstallerFileNotFoundIsElevationRetryable()
+    public async Task WingetInstallerFileNotFoundIsGuidanceNotElevation()
     {
         var runner = new StubRunner();
         runner.Enqueue(new(unchecked((int)0x80070002), "",
@@ -298,7 +298,8 @@ public sealed class SourceParsingTests
         var error = await Assert.ThrowsAsync<SourceException>(() =>
             source.UpdateAsync(new("Anthropic.Claude", "Claude", "1.25927.0"), context));
 
-        Assert.True(error.CanRetryElevated);
+        Assert.False(error.CanRetryElevated);
+        Assert.Contains("reinstall Claude", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -401,6 +402,121 @@ public sealed class SourceParsingTests
         await source.ScanAsync(context);
         Assert.Equal(3, runner.Invocations.Count);
         Assert.Contains("--outdated", runner.Invocations[^1].Arguments);
+    }
+
+    [Fact]
+    public async Task PackageSourcesUseTheirNativeCachePurgeCommands()
+    {
+        static ToolContext Context(string executable, params string[] prefix) =>
+            new(executable, "1", ToolResolutionOrigin.Custom, [], prefix);
+
+        var npmRunner = new StubRunner();
+        npmRunner.Enqueue(new(0, "", ""));
+        await new NpmSource(new StubResolver(), npmRunner)
+            .ClearCacheAsync(Context("npm.cmd"));
+        Assert.Equal(["cache", "clean", "--force"], npmRunner.Invocations.Single().Arguments);
+
+        var pipRunner = new StubRunner();
+        pipRunner.Enqueue(new(0, "", ""));
+        await new PipSource(new StubResolver(), pipRunner)
+            .ClearCacheAsync(Context("python.exe", "-m", "pip"));
+        Assert.Equal(["-m", "pip", "cache", "purge"], pipRunner.Invocations.Single().Arguments);
+
+        var scoopRunner = new StubRunner();
+        scoopRunner.Enqueue(new(0, "", ""));
+        await new ScoopSource(new StubResolver(), scoopRunner)
+            .ClearCacheAsync(Context("scoop.cmd"));
+        Assert.Equal(["cache", "rm", "--all"], scoopRunner.Invocations.Single().Arguments);
+
+        var dotnetRunner = new StubRunner();
+        dotnetRunner.Enqueue(new(0, "", ""));
+        await new DotnetSource(new StubResolver(), dotnetRunner, new HttpClient(new NeverCalledHandler()))
+            .ClearCacheAsync(Context("dotnet.exe"));
+        Assert.Equal(["nuget", "locals", "all", "--clear"], dotnetRunner.Invocations.Single().Arguments);
+    }
+
+    [Fact]
+    public async Task PipxPurgesThePipCacheForEveryManagedEnvironment()
+    {
+        var runner = new StubRunner();
+        runner.Enqueue(new(0, "black 25.1.0, installed using Python 3.13\nruff 0.12.0, installed using Python 3.13\n", ""));
+        runner.Enqueue(new(0, "Files removed: 4", ""));
+        runner.Enqueue(new(0, "Files removed: 0", ""));
+        var source = new PipxSource(new StubResolver(), runner, new HttpClient(new NeverCalledHandler()));
+
+        var message = await source.ClearCacheAsync(
+            new ToolContext("pipx.exe", "1.8", ToolResolutionOrigin.Custom, []));
+
+        Assert.Equal(3, runner.Invocations.Count);
+        Assert.Equal(["runpip", "black", "cache", "purge"], runner.Invocations[1].Arguments);
+        Assert.Equal(["runpip", "ruff", "cache", "purge"], runner.Invocations[2].Arguments);
+        Assert.Contains("2 pipx environments", message);
+    }
+
+    [Theory]
+    [InlineData("C:\\cache\\choco", "C:\\cache\\choco")]
+    [InlineData("cacheLocation|C:\\cache\\choco", "C:\\cache\\choco")]
+    [InlineData("cacheLocation = C:\\cache\\choco", "C:\\cache\\choco")]
+    public void ChocolateyCacheLocationParsingHandlesSupportedOutput(string output, string expected) =>
+        Assert.Equal(expected, ChocoSource.ParseCacheLocation(output));
+
+    [Fact]
+    public async Task ChocolateyPassesConfiguredCachePathWithoutShellInterpolation()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "PackMan-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var runner = new StubRunner();
+            runner.Enqueue(new(0, directory, ""));
+            runner.Enqueue(new(0, "", ""));
+            var source = new ChocoSource(new StubResolver(), runner, []);
+
+            await source.ClearCacheAsync(new ToolContext("choco.exe", "2.5", ToolResolutionOrigin.Custom, []));
+
+            Assert.Equal(2, runner.Invocations.Count);
+            var discovery = runner.Invocations[0];
+            Assert.True(discovery.Elevated);
+            Assert.Contains("--yes", discovery.Arguments);
+            Assert.Equal(TimeSpan.FromSeconds(15), discovery.Timeout);
+            var purge = runner.Invocations[1];
+            Assert.True(purge.Elevated);
+            Assert.Contains(directory, purge.Environment!["PACKMAN_CHOCO_CACHE_PATHS"]);
+            Assert.DoesNotContain(directory, purge.Arguments.Last());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ChocolateyDiscoveryTimeoutStillClearsKnownCaches()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "PackMan-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var runner = new StubRunner();
+            runner.EnqueueException(new TimeoutException("'choco.exe' timed out after 15s."));
+            runner.Enqueue(new ProcessResult(0, "", ""));
+            var output = new List<ProcessOutputEvent>();
+            var source = new ChocoSource(new StubResolver(), runner, [directory]);
+
+            var message = await source.ClearCacheAsync(
+                new ToolContext("choco.exe", "2.5", ToolResolutionOrigin.Custom, []),
+                new DelegateProgress<ProcessOutputEvent>(output.Add));
+
+            Assert.Equal(2, runner.Invocations.Count);
+            Assert.Contains(directory, runner.Invocations[1].Environment!["PACKMAN_CHOCO_CACHE_PATHS"]);
+            Assert.Contains(output, item => item.Stream == ProcessOutputStream.StandardError
+                && item.Line.Contains("clearing known locations", StringComparison.OrdinalIgnoreCase));
+            Assert.Contains("Cleared 1 Chocolatey cache location", message);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     private sealed class NeverCalledHandler : HttpMessageHandler

@@ -43,7 +43,7 @@ public sealed class ViewModelTests
     }
 
     [Fact]
-    public async Task FailedUpdateRemainsSelectedAndRetryable()
+    public async Task FailedUpdateRemainsSelected()
     {
         var report = new SourceScanReport([new("tool", "tool", "1", "2")], []);
         var source = new StubSource(SourceId.Npm, report,
@@ -56,9 +56,37 @@ public sealed class ViewModelTests
         var package = Assert.Single(vm.Packages);
         Assert.Equal(UpdateStatus.Failed, package.Status);
         Assert.True(package.IsSelected);
-        Assert.True(package.CanRetryElevated);
         Assert.Contains(vm.LogEntries, entry =>
-            entry.Message.Contains("Retry as administrator", StringComparison.OrdinalIgnoreCase));
+            entry.Message.Contains("Retrying with administrator approval", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task ManualElevatedRetrySucceeds()
+    {
+        var attempts = new List<bool>();
+        var report = new SourceScanReport([new("tool", "tool", "1", "2")], []);
+        var source = new StubSource(SourceId.Npm, report, request =>
+        {
+            attempts.Add(request.Elevated);
+            return request.Elevated
+                ? Task.CompletedTask
+                : Task.FromException(new SourceException(SourceIssueKind.Command, "plain failure", false));
+        });
+        var vm = new MainViewModel([source], new MemorySettings(), new StubSourceInstaller());
+        vm.ScanOrCancelCommand.Execute(null);
+        await WaitUntilIdle(vm);
+        vm.UpdateSelectedCommand.Execute(null);
+        await WaitUntilIdle(vm);
+        Assert.Equal([false], attempts);
+        var package = Assert.Single(vm.Packages);
+        Assert.Equal(UpdateStatus.Failed, package.Status);
+
+        vm.RetryElevatedCommand.Execute(package);
+        await WaitUntilIdle(vm);
+
+        Assert.Equal([false, true], attempts);
+        Assert.Empty(vm.Packages);
+        Assert.Equal(1, vm.UpdateSummary?.Updated);
     }
 
     [Fact]
@@ -239,7 +267,10 @@ public sealed class ViewModelTests
         Assert.Equal(2, attempts);
         var package = Assert.Single(vm.Packages);
         Assert.Equal(UpdateStatus.Failed, package.Status);
-        Assert.True(package.CanRetryElevated);
+        // Elevation was already attempted, so the manual administrator hint must not be offered.
+        Assert.False(package.CanRetryElevated);
+        Assert.DoesNotContain(vm.LogEntries, entry =>
+            entry.Message.Contains("Retry as administrator", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -350,6 +381,61 @@ public sealed class ViewModelTests
         Assert.Equal(SourceScanStatus.Unavailable, option.State.Status);
         Assert.Contains(vm.LogEntries, entry =>
             entry.Message.Contains("declined", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task ClearCacheRunsEverySupportedSourceAndContinuesAfterFailure()
+    {
+        var cleared = new List<SourceId>();
+        var npm = new StubSource(SourceId.Npm, SourceScanReport.Empty,
+            clearCache: _ =>
+            {
+                cleared.Add(SourceId.Npm);
+                return Task.FromResult("npm cleared");
+            });
+        var pip = new StubSource(SourceId.Pip, SourceScanReport.Empty,
+            clearCache: _ =>
+            {
+                cleared.Add(SourceId.Pip);
+                return Task.FromException<string>(new SourceException(SourceIssueKind.Command, "pip failed"));
+            });
+        var unsupported = new StubSource(SourceId.Pipx, SourceScanReport.Empty);
+        var vm = new MainViewModel([npm, pip, unsupported], new MemorySettings(), new StubSourceInstaller())
+        {
+            ConfirmCacheClear = _ => true,
+        };
+
+        vm.ClearCacheCommand.Execute(null);
+        await WaitUntilIdle(vm);
+
+        Assert.Equal([SourceId.Npm, SourceId.Pip], cleared);
+        Assert.Contains("failed 1", vm.CacheCleanupStatus, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(vm.LogEntries, entry =>
+            entry.Scope == SourceId.Npm.ToString() && entry.Level == LogLevel.Success);
+        Assert.Contains(vm.LogEntries, entry =>
+            entry.Scope == SourceId.Pip.ToString() && entry.Level == LogLevel.Error);
+    }
+
+    [Fact]
+    public async Task ClearCacheHonorsConfirmation()
+    {
+        var attempts = 0;
+        var source = new StubSource(SourceId.Npm, SourceScanReport.Empty,
+            clearCache: _ =>
+            {
+                attempts++;
+                return Task.FromResult("cleared");
+            });
+        var vm = new MainViewModel([source], new MemorySettings(), new StubSourceInstaller())
+        {
+            ConfirmCacheClear = _ => false,
+        };
+
+        vm.ClearCacheCommand.Execute(null);
+        await WaitUntilIdle(vm);
+
+        Assert.Equal(0, attempts);
+        Assert.Null(vm.CacheCleanupStatus);
     }
 
     private static async Task WaitUntilIdle(MainViewModel vm)

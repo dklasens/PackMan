@@ -101,6 +101,18 @@ public sealed class PipSource(IToolResolver resolver, IProcessRunner runner) : P
             .Select(e => new PackageInfo(e.Name!, e.Name!, e.Version ?? string.Empty, e.LatestVersion ?? string.Empty)).ToList(), issues);
     }
 
+    public override bool SupportsCacheClear => true;
+
+    public override async Task<string> ClearCacheAsync(ToolContext context,
+        IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
+    {
+        var result = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
+            Arguments(context, "cache", "purge"), context.Environment, TimeSpan.FromMinutes(2)),
+            output, cancellationToken);
+        if (!result.Success) throw SourceSupport.CommandFailure("pip cache purge", result);
+        return "Cleared the pip download cache.";
+    }
+
     public override async Task UpdateAsync(UpdateRequest request, ToolContext context,
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
     {

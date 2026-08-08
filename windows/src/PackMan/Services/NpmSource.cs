@@ -63,6 +63,18 @@ public sealed class NpmSource(IToolResolver resolver, IProcessRunner runner) : P
         return new(updates, issues);
     }
 
+    public override bool SupportsCacheClear => true;
+
+    public override async Task<string> ClearCacheAsync(ToolContext context,
+        IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
+    {
+        var result = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
+            Arguments(context, "cache", "clean", "--force"), context.Environment, TimeSpan.FromMinutes(2)),
+            output, cancellationToken);
+        if (!result.Success) throw SourceSupport.CommandFailure("npm cache clean", result);
+        return "Cleared the npm cache.";
+    }
+
     public override async Task UpdateAsync(UpdateRequest request, ToolContext context,
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
     {

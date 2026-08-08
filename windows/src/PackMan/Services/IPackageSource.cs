@@ -75,6 +75,7 @@ public interface IPackageSource
     SourceDescriptor Descriptor { get; }
     SourceId Id => Descriptor.Id;
     string Name => Descriptor.Name;
+    bool SupportsCacheClear => false;
     Task<SourceProbe> ProbeAsync(CancellationToken cancellationToken = default);
     Task<SourceScanReport> ScanAsync(ToolContext context, IProgress<SourcePhase>? progress = null,
         CancellationToken cancellationToken = default);
@@ -82,4 +83,7 @@ public interface IPackageSource
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default);
     Task<IReadOnlyDictionary<string, UpdateVerification>> VerifyAsync(
         IReadOnlyList<UpdateRequest> requests, ToolContext context, CancellationToken cancellationToken = default);
+    Task<string> ClearCacheAsync(ToolContext context, IProgress<ProcessOutputEvent>? output = null,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException($"{Name} has no cache to clear.");
 }

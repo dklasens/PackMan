@@ -15,6 +15,40 @@ public sealed class PipxSource(IToolResolver resolver, IProcessRunner runner, Ht
 
     private bool? _nativeOutdatedSupported;
 
+    public override bool SupportsCacheClear => true;
+
+    public override async Task<string> ClearCacheAsync(ToolContext context,
+        IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
+    {
+        // pipx delegates downloads to the pip inside each managed environment. Asking each
+        // environment to purge its own configured pip cache also handles non-default locations.
+        var list = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
+            Arguments(context, "list", "--short"), context.Environment, TimeSpan.FromMinutes(1)),
+            cancellationToken: cancellationToken);
+        if (!list.Success) throw SourceSupport.CommandFailure("pipx list", list);
+        var packages = list.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(line => line.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault())
+            .Where(PackageIdValidator.IsValid)
+            .Select(package => package!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (packages.Count == 0) return "pipx has no managed environments with package caches.";
+
+        var failures = new List<string>();
+        foreach (var package in packages)
+        {
+            var result = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
+                Arguments(context, "runpip", package, "cache", "purge"), context.Environment,
+                TimeSpan.FromMinutes(2)), output, cancellationToken);
+            if (!result.Success) failures.Add($"{package}: {SourceSupport.ErrorText(result)}");
+        }
+        if (failures.Count > 0)
+            throw new SourceException(SourceIssueKind.Command,
+                $"Could not clear {failures.Count} pipx cache{(failures.Count == 1 ? "" : "s")}: " +
+                string.Join("; ", failures));
+        return $"Cleared pip caches for {packages.Count} pipx environment{(packages.Count == 1 ? "" : "s")}.";
+    }
+
     public override async Task<SourceScanReport> ScanAsync(ToolContext context,
         IProgress<SourcePhase>? progress = null, CancellationToken cancellationToken = default)
     {

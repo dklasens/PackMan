@@ -54,6 +54,8 @@ Grab the latest `PackMan-Windows-x64.zip` from the [Releases](https://github.com
 > Requires Windows 10/11 (x64). PackMan scans as the current user and requests administrator approval only when an update needs it: Chocolatey upgrades always run elevated, and updates that fail with an administrator-style error are retried once with elevation automatically (one UAC prompt per batch). You can also retry any update manually as administrator from the context menu. Updates you hide with **Ignore** can be managed in the Sources window.
 >
 > Missing package managers can be installed directly from **Sources**: when a source is not available, an **Install** button downloads and installs it for you (Chocolatey and Scoop via their official scripts, pipx via your Python, Node.js/Python/.NET SDK via WinGet, WinGet itself via App Installer), prompting for elevation only when the installer requires it. The install runs only after PackMan has confirmed the manager is genuinely absent, and the source is re-checked afterwards. Optional sources can also be installed manually: [Chocolatey](https://chocolatey.org/install), [Scoop](https://scoop.sh/), Node.js/npm, Python/pip, pipx, and the [.NET SDK](https://dotnet.microsoft.com/download).
+>
+> If an installer download is stale or corrupt, open **Sources → Clear Cache** to purge staged installers and package caches for every available package manager. Chocolatey cache cleanup may request administrator approval; cleared files are downloaded again when needed, and NuGet-backed projects may need to restore packages again.
 
 ## Building from source
 

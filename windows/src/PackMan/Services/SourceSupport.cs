@@ -17,16 +17,16 @@ public static class SourceSupport
 
     public static bool IsElevationSignature(ProcessResult result, string text) =>
         result.ExitCode is ErrorAccessDenied or ErrorCancelled or ErrorElevationRequired
-            or HResultAccessDenied or HResultFileNotFound
+            or HResultAccessDenied
         || text.Contains("access is denied", StringComparison.OrdinalIgnoreCase)
         || text.Contains("administrator", StringComparison.OrdinalIgnoreCase)
         || text.Contains("elevat", StringComparison.OrdinalIgnoreCase)
         // WinGet wraps installer failures: the outer exit code is 0x8A150006 and the inner
         // installer code (1223 = the installer spawned its own UAC prompt that was dismissed)
-        // only appears in the output text.
+        // only appears in the output text. A missing file (0x80070002) is deliberately not
+        // treated as elevation-related: running elevated does not change file lookup.
         || text.Contains("exit code: 1223", StringComparison.OrdinalIgnoreCase)
-        || text.Contains("exit code: 0x80070005", StringComparison.OrdinalIgnoreCase)
-        || text.Contains("exit code: 0x80070002", StringComparison.OrdinalIgnoreCase);
+        || text.Contains("exit code: 0x80070005", StringComparison.OrdinalIgnoreCase);
 
     public static SourceException CommandFailure(string command, ProcessResult result)
     {

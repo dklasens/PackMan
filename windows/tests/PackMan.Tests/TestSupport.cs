@@ -6,15 +6,18 @@ namespace PackMan.Tests;
 
 internal sealed class StubRunner : IProcessRunner
 {
-    private readonly Queue<ProcessResult> _results = new();
+    private readonly Queue<object> _results = new();
     public List<ProcessInvocation> Invocations { get; } = [];
     public void Enqueue(ProcessResult result) => _results.Enqueue(result);
+    public void EnqueueException(Exception exception) => _results.Enqueue(exception);
     public Task<ProcessResult> RunAsync(ProcessInvocation invocation, IProgress<ProcessOutputEvent>? output = null,
         CancellationToken cancellationToken = default)
     {
         Invocations.Add(invocation);
         cancellationToken.ThrowIfCancellationRequested();
-        var result = _results.Dequeue();
+        var outcome = _results.Dequeue();
+        if (outcome is Exception exception) throw exception;
+        var result = (ProcessResult)outcome;
         foreach (var line in result.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries))
             output?.Report(new(ProcessOutputStream.StandardOutput, line));
         foreach (var line in result.StdErr.Split('\n', StringSplitOptions.RemoveEmptyEntries))
@@ -101,9 +104,11 @@ internal sealed class StubSource(
     SourceScanReport report,
     Func<UpdateRequest, Task>? update = null,
     Func<IReadOnlyList<UpdateRequest>, Task<IReadOnlyDictionary<string, UpdateVerification>>>? verify = null,
-    Func<Task<SourceProbe>>? probe = null) : IPackageSource
+    Func<Task<SourceProbe>>? probe = null,
+    Func<ToolContext, Task<string>>? clearCache = null) : IPackageSource
 {
     public SourceDescriptor Descriptor { get; } = new(id, id.ToString(), ToolId.Npm, "stub", []);
+    public bool SupportsCacheClear => clearCache is not null;
     public Task<SourceProbe> ProbeAsync(CancellationToken cancellationToken = default) => probe?.Invoke()
         ?? Task.FromResult(SourceProbe.Available(new ToolContext("stub", "1", ToolResolutionOrigin.Custom, [])));
     public Task<SourceScanReport> ScanAsync(ToolContext context, IProgress<SourcePhase>? progress = null,
@@ -114,4 +119,7 @@ internal sealed class StubSource(
         ToolContext context, CancellationToken cancellationToken = default) => verify?.Invoke(requests)
         ?? Task.FromResult<IReadOnlyDictionary<string, UpdateVerification>>(
             requests.ToDictionary(r => r.PackageId, r => new UpdateVerification(true, r.TargetVersion)));
+    public Task<string> ClearCacheAsync(ToolContext context, IProgress<ProcessOutputEvent>? output = null,
+        CancellationToken cancellationToken = default) => clearCache?.Invoke(context)
+        ?? throw new NotSupportedException();
 }

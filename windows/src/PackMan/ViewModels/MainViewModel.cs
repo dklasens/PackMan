@@ -51,6 +51,7 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private int _operationTotal;
     [ObservableProperty] private string? _currentItem;
     [ObservableProperty] private DateTimeOffset? _lastScanCompletedAt;
+    [ObservableProperty] private string? _cacheCleanupStatus;
 
     public bool IsBusy => Operation != AppOperationKind.Idle;
     public int UpdateCount => Packages.Count(p => p.IsActionable);
@@ -63,29 +64,32 @@ public partial class MainViewModel : ObservableObject
         or ScanSummaryKind.AllUnavailable or ScanSummaryKind.Cancelled;
     public bool ShowSourceProgress => Operation is AppOperationKind.Scanning or AppOperationKind.Cancelling
         && SourceOptions.Any(o => o.State.Status is SourceScanStatus.Probing or SourceScanStatus.Scanning or SourceScanStatus.Waiting);
+    public bool HasCacheCleanupStatus => !string.IsNullOrWhiteSpace(CacheCleanupStatus);
     public string ScanButtonText => IsBusy ? (Operation == AppOperationKind.Cancelling ? "Cancelling" : "Cancel") : "Scan";
     public string UpdateButtonText => SelectedCount > 0 ? $"Update {SelectedCount}" : "Update Selected";
     public string LogButtonText => IsLogVisible ? "Hide Log" : "Show Log";
     public static string VersionText =>
         typeof(MainViewModel).Assembly.GetName().Version is { } version
-            ? $"v{version.Major}.{version.Minor}"
+            ? $"v{version.Major}.{version.Minor}" + (version.Build > 0 ? $".{version.Build}" : string.Empty)
             : string.Empty;
     public string FooterText => $"{UpdateCount} update{(UpdateCount == 1 ? "" : "s")} • {SelectedCount} selected"
         + (LastScanCompletedAt is { } scannedAt ? $" • Last scan {scannedAt:HH:mm}" : string.Empty);
-    public string StatusText => ScanSummary switch
-    {
-        ScanSummaryKind.NotStarted => "Ready. Scan enabled sources for updates.",
-        ScanSummaryKind.Running => $"Scanning sources ({OperationCompleted}/{OperationTotal})…",
-        ScanSummaryKind.UpdatesAvailable => $"{UpdateCount} update{(UpdateCount == 1 ? "" : "s")} available.",
-        ScanSummaryKind.UpdatesCompleted => UpdateSummary is null ? "Updates completed." :
-            $"Updated {UpdateSummary.Updated}; failed {UpdateSummary.Failed + UpdateSummary.VerificationFailed}.",
-        ScanSummaryKind.UpToDate => "System is up to date. Every enabled source completed successfully.",
-        ScanSummaryKind.CompletedWithIssues => $"Scan completed with issues; {UpdateCount} update{(UpdateCount == 1 ? "" : "s")} found.",
-        ScanSummaryKind.AllUnavailable => "No enabled source could be scanned.",
-        ScanSummaryKind.NoSources => "No sources selected.",
-        ScanSummaryKind.Cancelled => "Scan cancelled. Completed source results were preserved.",
-        _ => string.Empty,
-    };
+    public string StatusText => Operation == AppOperationKind.CleaningCache
+        ? CacheCleanupStatus ?? "Clearing package caches…"
+        : ScanSummary switch
+        {
+            ScanSummaryKind.NotStarted => "Ready. Scan enabled sources for updates.",
+            ScanSummaryKind.Running => $"Scanning sources ({OperationCompleted}/{OperationTotal})…",
+            ScanSummaryKind.UpdatesAvailable => $"{UpdateCount} update{(UpdateCount == 1 ? "" : "s")} available.",
+            ScanSummaryKind.UpdatesCompleted => UpdateSummary is null ? "Updates completed." :
+                $"Updated {UpdateSummary.Updated}; failed {UpdateSummary.Failed + UpdateSummary.VerificationFailed}.",
+            ScanSummaryKind.UpToDate => "System is up to date. Every enabled source completed successfully.",
+            ScanSummaryKind.CompletedWithIssues => $"Scan completed with issues; {UpdateCount} update{(UpdateCount == 1 ? "" : "s")} found.",
+            ScanSummaryKind.AllUnavailable => "No enabled source could be scanned.",
+            ScanSummaryKind.NoSources => "No sources selected.",
+            ScanSummaryKind.Cancelled => "Scan cancelled. Completed source results were preserved.",
+            _ => string.Empty,
+        };
     public string EmptyTitle => ScanSummary switch
     {
         ScanSummaryKind.NotStarted => "Ready to Scan",
@@ -251,6 +255,8 @@ public partial class MainViewModel : ObservableObject
         MessageBox.Show(message, "PackMan", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes;
     internal Action<string> ShowInstallNotice { get; set; } = message =>
         MessageBox.Show(message, "PackMan", MessageBoxButton.OK, MessageBoxImage.Information);
+    internal Func<string, bool> ConfirmCacheClear { get; set; } = message =>
+        MessageBox.Show(message, "PackMan", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes;
 
     [RelayCommand]
     private async Task InstallSource(SourceOptionViewModel? option)
@@ -364,6 +370,99 @@ public partial class MainViewModel : ObservableObject
             DeriveScanSummary();
         else if (UpdateCount > 0) ScanSummary = ScanSummaryKind.UpdatesAvailable;
         RefreshComputed();
+    }
+
+    [RelayCommand]
+    private void ClearCache()
+    {
+        if (IsBusy) return;
+        var sources = _sources.Where(source => source.SupportsCacheClear).ToList();
+        if (sources.Count == 0)
+        {
+            CacheCleanupStatus = "No package-manager caches are available to clear.";
+            return;
+        }
+        const string confirmation =
+            "Clear downloaded installers and package caches for every available source?\n\n" +
+            "Future installs may need to download these files again. Clearing the NuGet cache also means " +
+            "projects may need to restore their packages again.";
+        if (!ConfirmCacheClear(confirmation)) return;
+        StartOperation(ct => RunCacheCleanupAsync(sources, ct));
+    }
+
+    private async Task RunCacheCleanupAsync(IReadOnlyList<IPackageSource> sources,
+        CancellationToken cancellationToken)
+    {
+        Operation = AppOperationKind.CleaningCache;
+        OperationCompleted = 0;
+        OperationTotal = sources.Count;
+        CacheCleanupStatus = $"Clearing caches (0/{sources.Count})…";
+        AppendLog($"Clearing package caches for {sources.Count} source(s).");
+        var cleared = 0;
+        var skipped = 0;
+        var failed = 0;
+
+        foreach (var source in sources)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            CurrentItem = source.Name;
+            CacheCleanupStatus = $"Clearing {source.Name} ({OperationCompleted + 1}/{OperationTotal})…";
+            try
+            {
+                var option = SourceOptions.First(o => o.Id == source.Id);
+                var context = option.ToolContext ?? _settings.GetCachedContext(source.Id);
+                if (context is null)
+                {
+                    var probe = await source.ProbeAsync(cancellationToken);
+                    if (!probe.IsAvailable)
+                    {
+                        skipped++;
+                        AppendLog($"Cache cleanup skipped — {probe.Issue?.Message ?? "source is unavailable"}.",
+                            LogLevel.Warning, source.Name);
+                        continue;
+                    }
+                    context = probe.Context!;
+                    option.ToolContext = context;
+                    option.ProbeIssue = null;
+                    TrySetCachedContext(option.Id, context);
+                    option.Refresh();
+                }
+
+                var progress = new Progress<ProcessOutputEvent>(output =>
+                {
+                    var line = output.Line.Trim();
+                    if (line.Length > 0) AppendLog(line, LogLevel.Output, source.Name, output.Stream);
+                });
+                var result = await source.ClearCacheAsync(context, progress, cancellationToken);
+                cleared++;
+                AppendLog(result, LogLevel.Success, source.Name);
+            }
+            catch (ElevationDeclinedException ex)
+            {
+                failed++;
+                AppendLog(ex.Message, LogLevel.Warning, source.Name);
+            }
+            catch (OperationCanceledException)
+            {
+                CacheCleanupStatus = $"Cache cleanup cancelled after {cleared} source{(cleared == 1 ? "" : "s")}.";
+                AppendLog(CacheCleanupStatus, LogLevel.Warning);
+                return;
+            }
+            catch (Exception ex)
+            {
+                failed++;
+                AppendLog($"Cache cleanup failed — {ex.Message}", LogLevel.Error, source.Name);
+            }
+            finally
+            {
+                OperationCompleted++;
+            }
+        }
+
+        CacheCleanupStatus = failed > 0
+            ? $"Cleared {cleared}; skipped {skipped}; failed {failed}. Open the main log for details."
+            : $"Cache cleanup complete: {cleared} cleared" + (skipped > 0 ? $"; {skipped} unavailable" : string.Empty) + ".";
+        AppendLog(CacheCleanupStatus, failed > 0 ? LogLevel.Warning : LogLevel.Success);
     }
 
     private void StartUpdates(IReadOnlyList<(PackageUpdate Package, bool Elevated)> packages)
@@ -498,10 +597,12 @@ public partial class MainViewModel : ObservableObject
         {
             case OutcomeKind.Report:
                 var report = outcome.Report!;
-                ReplacePackages(option, report.Updates);
+                var hidden = ReplacePackages(option, report.Updates);
+                var visible = report.Updates.Count - hidden;
                 option.State.Set(report.Issues.Count == 0 ? SourceScanStatus.Succeeded : SourceScanStatus.Partial,
-                    updateCount: report.Updates.Count, issues: report.Issues);
-                AppendLog($"{option.Name}: {(report.Issues.Count == 0 ? "" : "partial • ")}{report.Updates.Count} update(s).",
+                    updateCount: visible, issues: report.Issues);
+                AppendLog($"{option.Name}: {(report.Issues.Count == 0 ? "" : "partial • ")}{visible} update(s)"
+                    + (hidden > 0 ? $", {hidden} hidden by ignore rules" : string.Empty) + ".",
                     report.Issues.Count == 0 ? LogLevel.Info : LogLevel.Warning);
                 foreach (var issue in report.Issues) AppendLog(issue.Message, LogLevel.Warning, option.Name);
                 break;
@@ -686,18 +787,24 @@ public partial class MainViewModel : ObservableObject
             && !cancellationToken.IsCancellationRequested)
         {
             AppendLog("Retrying with administrator approval…", LogLevel.Warning, package.Name);
-            await package.SourceRef.UpdateAsync(request with { Elevated = true },
-                package.ToolContext, progress, cancellationToken);
+            try
+            {
+                await package.SourceRef.UpdateAsync(request with { Elevated = true },
+                    package.ToolContext, progress, cancellationToken);
+            }
+            catch (SourceException elevatedEx) when (elevatedEx.CanRetryElevated)
+            {
+                // Elevation was already tried: offering another administrator retry is misleading.
+                throw new SourceException(elevatedEx.Kind, elevatedEx.Message, canRetryElevated: false);
+            }
         }
     }
 
-    private void ReplacePackages(SourceOptionViewModel option, IReadOnlyList<PackageInfo> infos)
+    private int ReplacePackages(SourceOptionViewModel option, IReadOnlyList<PackageInfo> infos)
     {
         RemovePackages(option.Id);
         var ignored = _settings.GetIgnoredUpdates();
         var visible = infos.Where(info => !IsIgnored(ignored, option.Id, info)).ToList();
-        if (infos.Count - visible.Count is > 0 and var hidden)
-            AppendLog($"{option.Name}: {hidden} update(s) hidden by ignore rules.");
         foreach (var info in visible)
         {
             var package = new PackageUpdate
@@ -718,6 +825,7 @@ public partial class MainViewModel : ObservableObject
             Packages.Add(package);
         }
         PackagesView.Refresh();
+        return infos.Count - visible.Count;
     }
 
     private void RemovePackages(SourceId sourceId)
@@ -786,6 +894,7 @@ public partial class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(SourceIssueCount));
         OnPropertyChanged(nameof(ShowIssueBanner));
         OnPropertyChanged(nameof(ShowSourceProgress));
+        OnPropertyChanged(nameof(HasCacheCleanupStatus));
         OnPropertyChanged(nameof(ScanButtonText));
         OnPropertyChanged(nameof(UpdateButtonText));
         OnPropertyChanged(nameof(LogButtonText));
@@ -802,6 +911,11 @@ public partial class MainViewModel : ObservableObject
     partial void OnOperationCompletedChanged(int value) => OnPropertyChanged(nameof(StatusText));
     partial void OnOperationTotalChanged(int value) => OnPropertyChanged(nameof(StatusText));
     partial void OnLastScanCompletedAtChanged(DateTimeOffset? value) => OnPropertyChanged(nameof(FooterText));
+    partial void OnCacheCleanupStatusChanged(string? value)
+    {
+        OnPropertyChanged(nameof(HasCacheCleanupStatus));
+        OnPropertyChanged(nameof(StatusText));
+    }
 
     private enum OutcomeKind { Report, Unavailable, Failed, Cancelled }
     private sealed record SourceOutcome(SourceOptionViewModel Option, OutcomeKind Kind,

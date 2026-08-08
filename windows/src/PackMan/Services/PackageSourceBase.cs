@@ -7,6 +7,7 @@ public abstract class PackageSourceBase(IToolResolver resolver, IProcessRunner r
     public abstract SourceDescriptor Descriptor { get; }
     public SourceId Id => Descriptor.Id;
     public string Name => Descriptor.Name;
+    public virtual bool SupportsCacheClear => false;
     protected virtual IReadOnlyList<string> VersionArguments => ["--version"];
 
     public virtual async Task<SourceProbe> ProbeAsync(CancellationToken cancellationToken = default)
@@ -44,6 +45,10 @@ public abstract class PackageSourceBase(IToolResolver resolver, IProcessRunner r
         CancellationToken cancellationToken = default);
     public abstract Task UpdateAsync(UpdateRequest request, ToolContext context,
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default);
+
+    public virtual Task<string> ClearCacheAsync(ToolContext context,
+        IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException($"{Name} has no cache to clear.");
 
     public virtual async Task<IReadOnlyDictionary<string, UpdateVerification>> VerifyAsync(
         IReadOnlyList<UpdateRequest> requests, ToolContext context, CancellationToken cancellationToken = default)

@@ -78,6 +78,26 @@
                             </ItemsControl>
                         </StackPanel>
                     </Border>
+                    <Border Padding="18,13" BorderThickness="0,1,0,0" BorderBrush="#18000000">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Margin="0,0,18,0">
+                                <TextBlock Text="Package Cache" FontWeight="SemiBold" Margin="0,4,0,3" />
+                                <TextBlock Text="Purge downloaded installers and package caches from every available source. Files are downloaded again when needed."
+                                           TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="{Binding CacheCleanupStatus}" TextWrapping="Wrap" Margin="0,7,0,0"
+                                           Visibility="{Binding HasCacheCleanupStatus, Converter={StaticResource BoolToVis}}" />
+                            </StackPanel>
+                            <ui:Button Grid.Column="1" AutomationProperties.AutomationId="clearCacheButton"
+                                       Content="Clear Cache" Command="{Binding ClearCacheCommand}"
+                                       IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
+                                       Padding="14,6" VerticalAlignment="Top" Margin="0,4,0,0"
+                                       ToolTip="Purge staged installers and cached package downloads" />
+                        </Grid>
+                    </Border>
                 </StackPanel>
             </ScrollViewer>
             <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="16,10">

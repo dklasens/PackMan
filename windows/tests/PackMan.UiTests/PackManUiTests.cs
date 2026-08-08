@@ -76,6 +76,7 @@ public sealed class PackManUiTests
         }));
         Assert.NotNull(sources);
         Assert.NotNull(sources!.FindFirstDescendant(cf => cf.ByText("C:\\ui-test\\npm.cmd")));
+        Assert.NotNull(sources.FindFirstDescendant(cf => cf.ByAutomationId("clearCacheButton")));
     }
 
     private static UiSession Launch(string scenario)

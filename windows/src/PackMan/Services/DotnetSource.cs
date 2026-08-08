@@ -76,6 +76,18 @@ public sealed class DotnetSource(IToolResolver resolver, IProcessRunner runner, 
         return new(updates.OrderBy(x => x.Name, StringComparer.CurrentCultureIgnoreCase).ToList(), issues);
     }
 
+    public override bool SupportsCacheClear => true;
+
+    public override async Task<string> ClearCacheAsync(ToolContext context,
+        IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
+    {
+        var result = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
+            Arguments(context, "nuget", "locals", "all", "--clear"), context.Environment, TimeSpan.FromMinutes(3)),
+            output, cancellationToken);
+        if (!result.Success) throw SourceSupport.CommandFailure("dotnet nuget locals", result);
+        return "Cleared the NuGet caches (global packages, HTTP, temp, plugins).";
+    }
+
     public override async Task UpdateAsync(UpdateRequest request, ToolContext context,
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
     {

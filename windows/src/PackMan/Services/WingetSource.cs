@@ -34,6 +34,18 @@ public sealed class WingetSource(IToolResolver resolver, IProcessRunner runner) 
                 row.Truncated ? "WinGet truncated this record; the exact update may fail." : null)).ToList(), issues);
     }
 
+    public override bool SupportsCacheClear => true;
+
+    public override async Task<string> ClearCacheAsync(ToolContext context,
+        IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
+    {
+        // WinGet downloads installers to %TEMP%\WinGet; deleting the folder forces clean downloads.
+        var directory = Path.Combine(Path.GetTempPath(), "WinGet");
+        if (!Directory.Exists(directory)) return "WinGet's download cache was already empty.";
+        await Task.Run(() => Directory.Delete(directory, recursive: true), cancellationToken);
+        return "Cleared the WinGet download cache.";
+    }
+
     public override async Task UpdateAsync(UpdateRequest request, ToolContext context,
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
     {
@@ -48,6 +60,13 @@ public sealed class WingetSource(IToolResolver resolver, IProcessRunner runner) 
             throw new SourceException(SourceIssueKind.Configuration,
                 "WinGet cannot upgrade this package because the new version uses a different install technology. " +
                 "Uninstall and reinstall the package, or ignore this update.");
+        // A missing-file installer failure is a broken package or existing installation, not a
+        // permissions problem: elevation does not change file lookup, so do not retry elevated.
+        if (result.ExitCode == SourceSupport.HResultFileNotFound
+            || SourceSupport.ErrorText(result).Contains("exit code: 0x80070002", StringComparison.OrdinalIgnoreCase))
+            throw new SourceException(SourceIssueKind.Configuration,
+                $"{request.Name}'s installer could not find a file it needs. The existing installation is " +
+                $"likely broken; reinstall {request.Name}, or update it from within the app.");
         if (!result.Success) throw SourceSupport.CommandFailure("winget upgrade", result);
     }
 }
