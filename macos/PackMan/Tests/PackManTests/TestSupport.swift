@@ -139,6 +139,7 @@ struct StubSource: PackageSource {
     let scanHandler: @Sendable () async throws -> SourceScanReport
     let updateHandler: @Sendable (UpdateRequest) async throws -> Void
     let verifyHandler: @Sendable ([UpdateRequest]) async throws -> [String: UpdateVerification]
+    let clearCacheHandler: @Sendable () async throws -> Int64
 
     init(
         id: SourceID,
@@ -148,12 +149,13 @@ struct StubSource: PackageSource {
         update: @escaping @Sendable (UpdateRequest) async throws -> Void = { _ in },
         verify: @escaping @Sendable ([UpdateRequest]) async throws -> [String: UpdateVerification] = { requests in
             Dictionary(uniqueKeysWithValues: requests.map { ($0.packageID, .satisfied(installedVersion: $0.targetVersion)) })
-        }
+        },
+        clearCache: @escaping @Sendable () async throws -> Int64 = { 0 }
     ) {
         descriptor = SourceDescriptor(
             id: id,
             name: name,
-            toolID: id == .npm ? .npm : .brew,
+            toolID: id == .npm ? .npm : (id == .homebrew || id == .homebrewCasks ? .brew : (id == .pip ? .python : (id == .pipx ? .pipx : (id == .appStore ? .mas : .dotnet)))),
             executableName: name.lowercased(),
             knownPaths: [],
             installationURL: nil)
@@ -161,6 +163,7 @@ struct StubSource: PackageSource {
         scanHandler = scan
         updateHandler = update
         verifyHandler = verify
+        clearCacheHandler = clearCache
     }
 
     func probe() async -> SourceProbe { await probeHandler() }
@@ -186,6 +189,13 @@ struct StubSource: PackageSource {
         context: ToolContext
     ) async throws -> [String: UpdateVerification] {
         try await verifyHandler(requests)
+    }
+
+    func clearCache(
+        context: ToolContext,
+        onOutput: @escaping @Sendable (ProcessOutputEvent) async -> Void
+    ) async throws -> Int64 {
+        try await clearCacheHandler()
     }
 }
 

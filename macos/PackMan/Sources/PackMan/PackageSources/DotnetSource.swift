@@ -144,6 +144,29 @@ struct DotnetSource: PackageSource {
             return .failed(id: id, message: error.decodingDescription)
         }
     }
+
+    func clearCache(
+        context: ToolContext,
+        onOutput: @escaping @Sendable (ProcessOutputEvent) async -> Void
+    ) async throws -> Int64 {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let nugetCacheURLs = [
+            home.appendingPathComponent(".nuget"),
+            home.appendingPathComponent(".local/share/NuGet")
+        ]
+        let sizeBefore = SourceSupport.directorySize(at: nugetCacheURLs)
+
+        let result = try await runner.run(
+            context.executablePath,
+            ["nuget", "locals", "all", "--clear"],
+            timeout: 180,
+            environment: SourceSupport.environment(pathEntries: context.pathEntries),
+            onOutput: onOutput)
+        guard result.succeeded else { throw SourceSupport.commandFailure("dotnet nuget locals all --clear", result: result) }
+
+        let sizeAfter = SourceSupport.directorySize(at: nugetCacheURLs)
+        return max(0, sizeBefore - sizeAfter)
+    }
 }
 
 enum DotnetLookup: Sendable {

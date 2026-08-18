@@ -47,6 +47,7 @@ enum AppOperation: Sendable, Equatable {
     case idle
     case scanning(completed: Int, total: Int)
     case updating(current: String?, completed: Int, total: Int)
+    case clearingCache(current: String?, completed: Int, total: Int)
     case cancelling
 
     var isBusy: Bool { self != .idle }

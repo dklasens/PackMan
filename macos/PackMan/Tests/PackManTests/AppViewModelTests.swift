@@ -259,6 +259,70 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(message.contains("cancelled"))
     }
 
+    func testClearAllCachesExecutesAndLogs() async throws {
+        let clearedCounter = Counter()
+        let source1 = StubSource(
+            id: .npm,
+            name: "npm",
+            probe: { .available(testToolContext) },
+            scan: { SourceScanReport() },
+            clearCache: { await clearedCounter.increment(); return 1024 })
+        let source2 = StubSource(
+            id: .homebrew,
+            name: "Homebrew",
+            probe: { .available(testToolContext) },
+            scan: { SourceScanReport() },
+            clearCache: { await clearedCounter.increment(); return 2048 })
+
+        let viewModel = AppViewModel(sources: [source1, source2], settings: MemorySettings())
+        viewModel.startClearAllCaches()
+        try await waitUntilIdle(viewModel)
+
+        let clearedCount = await clearedCounter.value
+        XCTAssertEqual(clearedCount, 2)
+        XCTAssertTrue(viewModel.logEntries.contains { $0.message.contains("Cache cleared successfully") || $0.message.contains("Cache cleanup completed") })
+    }
+
+    func testClearCacheSingleExecutesForOneSource() async throws {
+        let clearedCounter = Counter()
+        let source1 = StubSource(
+            id: .npm,
+            name: "npm",
+            probe: { .available(testToolContext) },
+            scan: { SourceScanReport() },
+            clearCache: { await clearedCounter.increment(); return 1024 })
+        let source2 = StubSource(
+            id: .pip,
+            name: "pip",
+            probe: { .available(testToolContext) },
+            scan: { SourceScanReport() },
+            clearCache: { await clearedCounter.increment(); return 2048 })
+
+        let viewModel = AppViewModel(sources: [source1, source2], settings: MemorySettings())
+        let option1 = try XCTUnwrap(viewModel.sourceOptions.first { $0.id == .npm })
+        viewModel.startClearCacheSingle(option1)
+        try await waitUntilIdle(viewModel)
+
+        let clearedCount = await clearedCounter.value
+        XCTAssertEqual(clearedCount, 1)
+    }
+
+    func testSearchFilterMatchesPackageNameAndSource() async throws {
+        let u1 = PackageInfo(id: "react", name: "react", currentVersion: "17.0.0", availableVersion: "18.0.0")
+        let u2 = PackageInfo(id: "express", name: "express", currentVersion: "4.0.0", availableVersion: "4.1.0")
+        let source = availableSource(id: .npm, name: "npm", report: SourceScanReport(updates: [u1, u2]))
+        let viewModel = AppViewModel(sources: [source], settings: MemorySettings())
+        viewModel.startScan()
+        try await waitUntilIdle(viewModel)
+
+        XCTAssertEqual(viewModel.filteredPackages.count, 2)
+        viewModel.searchText = "react"
+        XCTAssertEqual(viewModel.filteredPackages.map(\.name), ["react"])
+
+        viewModel.searchText = "nonexistent"
+        XCTAssertTrue(viewModel.filteredPackages.isEmpty)
+    }
+
     private func availableSource(id: SourceID, name: String, report: SourceScanReport) -> StubSource {
         StubSource(
             id: id,

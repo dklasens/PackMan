@@ -166,6 +166,11 @@ protocol PackageSource: Sendable {
         requests: [UpdateRequest],
         context: ToolContext
     ) async throws -> [String: UpdateVerification]
+
+    func clearCache(
+        context: ToolContext,
+        onOutput: @escaping @Sendable (ProcessOutputEvent) async -> Void
+    ) async throws -> Int64
 }
 
 extension PackageSource {
@@ -197,6 +202,13 @@ extension PackageSource {
             }
             return (request.packageID, .satisfied(installedVersion: request.targetVersion))
         })
+    }
+
+    func clearCache(
+        context: ToolContext,
+        onOutput: @escaping @Sendable (ProcessOutputEvent) async -> Void
+    ) async throws -> Int64 {
+        return 0
     }
 }
 

@@ -49,7 +49,6 @@ struct MasSource: PackageSource {
             ["outdated"],
             timeout: 180,
             environment: SourceSupport.environment(pathEntries: context.pathEntries))
-        guard result.succeeded else { throw SourceSupport.commandFailure("mas outdated", result: result) }
 
         var updates: [PackageInfo] = []
         var rejected = 0
@@ -70,6 +69,14 @@ struct MasSource: PackageSource {
         if let indexingIssue = MasIndexingWarningParser.issue(fromStderr: result.stderr) {
             issues.append(indexingIssue)
         }
+        if let networkIssue = MasNetworkErrorParser.issue(fromStderr: result.stderr) {
+            issues.append(networkIssue)
+        }
+
+        if !result.succeeded && issues.isEmpty && updates.isEmpty {
+            throw SourceSupport.commandFailure("mas outdated", result: result)
+        }
+
         return SourceScanReport(updates: updates, issues: issues)
     }
 
@@ -119,6 +126,14 @@ struct MasSource: PackageSource {
         })
     }
 
+    func clearCache(
+        context: ToolContext,
+        onOutput: @escaping @Sendable (ProcessOutputEvent) async -> Void
+    ) async throws -> Int64 {
+        await onOutput(ProcessOutputEvent(stream: .stdout, line: "App Store cache is managed automatically by macOS."))
+        return 0
+    }
+
     static func appStorePageURL(forADAMID id: String) -> URL? {
         URL(string: "macappstore://apps.apple.com/app/id\(id)")
     }
@@ -162,6 +177,28 @@ enum MasIndexingWarningParser {
             kind: .configuration,
             message: "\(names.count) App Store app(s) are not indexed in Spotlight and were skipped: \(listed)\(suffix). mas started indexing them.",
             recovery: "Scan again shortly. If apps remain missing, run `sudo mdutil -Eai on` in Terminal to rebuild the Spotlight index.")
+    }
+}
+
+enum MasNetworkErrorParser {
+    static func issue(fromStderr stderr: String) -> SourceIssue? {
+        guard stderr.contains("NSURLErrorDomain")
+                || stderr.contains("The request timed out.")
+                || stderr.contains("itunes.apple.com") else { return nil }
+
+        let detail: String
+        if let bundleRange = stderr.range(of: "bundleId=") {
+            let suffix = stderr[bundleRange.upperBound...]
+            let bundleId = suffix.split(whereSeparator: { $0 == "," || $0 == " " || $0 == "\n" || $0 == "}" }).first.map(String.init) ?? ""
+            detail = bundleId.isEmpty ? "Network request to iTunes Store timed out." : "iTunes Store request timed out for \(bundleId)."
+        } else {
+            detail = "Network request to iTunes Store timed out."
+        }
+
+        return SourceIssue(
+            kind: .network,
+            message: "App Store scan encountered a network issue: \(detail)",
+            recovery: "Apple iTunes lookup timed out. Check network connection and retry the scan.")
     }
 }
 

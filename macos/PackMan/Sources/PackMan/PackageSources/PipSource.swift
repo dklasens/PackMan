@@ -167,6 +167,29 @@ print(json.dumps(list(dependents.values()), ensure_ascii=True))
             .first { !$0.isEmpty } ?? "No diagnostic output."
         return "\(command) failed (exit \(result.exitCode)): \(detail)"
     }
+
+    func clearCache(
+        context: ToolContext,
+        onOutput: @escaping @Sendable (ProcessOutputEvent) async -> Void
+    ) async throws -> Int64 {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let pipCacheURLs = [
+            home.appendingPathComponent("Library/Caches/pip"),
+            home.appendingPathComponent(".cache/pip")
+        ]
+        let sizeBefore = SourceSupport.directorySize(at: pipCacheURLs)
+
+        let result = try await runner.run(
+            context.executablePath,
+            ["-m", "pip", "cache", "purge"],
+            timeout: 180,
+            environment: SourceSupport.environment(pathEntries: context.pathEntries),
+            onOutput: onOutput)
+        guard result.succeeded else { throw SourceSupport.commandFailure("pip cache purge", result: result) }
+
+        let sizeAfter = SourceSupport.directorySize(at: pipCacheURLs)
+        return max(0, sizeBefore - sizeAfter)
+    }
 }
 
 struct PipOutdatedEntry: Decodable {

@@ -86,6 +86,38 @@ enum SourceSupport {
         return .commandFailed("\(command) failed (exit \(result.exitCode)): \(detail)")
     }
 
+    static func directorySize(at urls: [URL]) -> Int64 {
+        urls.reduce(0) { total, url in total + directorySize(at: url) }
+    }
+
+    static func directorySize(at url: URL) -> Int64 {
+        let fileManager = FileManager.default
+        var isDir: ObjCBool = false
+        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDir) else { return 0 }
+        if !isDir.boolValue {
+            let attrs = (try? fileManager.attributesOfItem(atPath: url.path)) ?? [:]
+            return (attrs[.size] as? NSNumber)?.int64Value ?? 0
+        }
+        let keys: Set<URLResourceKey> = [.fileSizeKey, .isRegularFileKey]
+        guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: Array(keys), options: []) else { return 0 }
+        var total: Int64 = 0
+        for case let fileURL as URL in enumerator {
+            if let resourceValues = try? fileURL.resourceValues(forKeys: keys),
+               resourceValues.isRegularFile == true,
+               let size = resourceValues.fileSize {
+                total += Int64(size)
+            }
+        }
+        return total
+    }
+
+    static func formatBytes(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useBytes, .useKB, .useMB, .useGB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
+    }
+
     private static func unique(_ values: [String]) -> [String] {
         var seen = Set<String>()
         return values.filter { seen.insert($0).inserted }

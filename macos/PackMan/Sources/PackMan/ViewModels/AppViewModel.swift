@@ -63,6 +63,7 @@ final class AppViewModel {
         PackageSortComparator(field: .source),
         PackageSortComparator(field: .name),
     ]
+    var searchText = ""
     var isLogVisible = false
 
     let sourceOptions: [SourceOption]
@@ -101,7 +102,20 @@ final class AppViewModel {
 
     var isBusy: Bool { operation.isBusy }
     var enabledSourceCount: Int { sourceOptions.filter(\.isEnabled).count }
-    var actionablePackages: [PackageUpdate] { packages.filter(\.isActionable) }
+
+    var filteredPackages: [PackageUpdate] {
+        guard !searchText.trimmed.isEmpty else { return packages }
+        let query = searchText.trimmed.lowercased()
+        return packages.filter { package in
+            package.name.lowercased().contains(query) ||
+            package.packageID.lowercased().contains(query) ||
+            package.source.lowercased().contains(query) ||
+            package.currentVersion.lowercased().contains(query) ||
+            package.availableVersion.lowercased().contains(query)
+        }
+    }
+
+    var actionablePackages: [PackageUpdate] { filteredPackages.filter(\.isActionable) }
     var selectedPackages: [PackageUpdate] { actionablePackages.filter(\.isSelected) }
     var selectedCount: Int { selectedPackages.count }
     var updateCount: Int { actionablePackages.count }
@@ -141,6 +155,9 @@ final class AppViewModel {
         case .updating(let current, let completed, let total):
             if let current { return "Updating \(current) (\(completed + 1) of \(total))…" }
             return "Preparing updates…"
+        case .clearingCache(let current, let completed, let total):
+            if let current { return "Clearing cache for \(current) (\(completed + 1) of \(total))…" }
+            return "Clearing caches…"
         case .cancelling:
             return "Cancelling…"
         case .idle:
@@ -211,6 +228,106 @@ final class AppViewModel {
     func startUpdateSingle(_ package: PackageUpdate) {
         guard package.isActionable else { return }
         startUpdate(packages: [package])
+    }
+
+    func startClearAllCaches() {
+        guard activeTask == nil else { return }
+        let enabledOptions = sourceOptions.filter(\.isEnabled)
+        guard !enabledOptions.isEmpty else { return }
+        activeTask = Task { [weak self] in
+            await self?.runClearCaches(options: enabledOptions)
+        }
+        startedOperations += 1
+    }
+
+    func startClearCacheSingle(_ option: SourceOption) {
+        guard activeTask == nil, option.isEnabled else { return }
+        activeTask = Task { [weak self] in
+            await self?.runClearCaches(options: [option])
+        }
+        startedOperations += 1
+    }
+
+    private func runClearCaches(options: [SourceOption]) async {
+        isLogVisible = true
+        appendLog("Cache cleanup started (\(options.map(\.name).joined(separator: ", "))).")
+        operation = .clearingCache(current: nil, completed: 0, total: options.count)
+
+        var completed = 0
+        var succeededCount = 0
+        var failedCount = 0
+        var totalBytesFreed: Int64 = 0
+        var processedToolIDs = Set<ToolID>()
+
+        for option in options {
+            if Task.isCancelled { break }
+            operation = .clearingCache(current: option.name, completed: completed, total: options.count)
+
+            let toolID = option.descriptor.toolID
+            if options.count > 1 && processedToolIDs.contains(toolID) {
+                completed += 1
+                succeededCount += 1
+                appendLog("\(option.name): cache cleanup already executed via \(toolID.rawValue).")
+                continue
+            }
+            processedToolIDs.insert(toolID)
+
+            let context: ToolContext?
+            if let existingContext = option.toolContext ?? settings.cachedContext(for: option.id) {
+                context = existingContext
+            } else {
+                let probe = await option.source.probe()
+                if case .available(let probedContext) = probe {
+                    context = probedContext
+                    setSourceContext(probedContext, for: option.id)
+                } else {
+                    context = nil
+                }
+            }
+
+            guard let context else {
+                completed += 1
+                failedCount += 1
+                appendLog("\(option.name): cache clear skipped — tool executable not available.", level: .warning)
+                continue
+            }
+
+            let sourceName = option.name
+            let commandID = "clear-cache-\(option.id.rawValue)"
+            do {
+                let bytesFreed = try await option.source.clearCache(context: context) { [weak self] event in
+                    await self?.appendOutput(commandID: commandID, scope: sourceName, event: event)
+                }
+                succeededCount += 1
+                totalBytesFreed += bytesFreed
+                if bytesFreed > 0 {
+                    appendLog("\(option.name): cache cleared successfully (\(SourceSupport.formatBytes(bytesFreed)) freed).", level: .success)
+                } else {
+                    appendLog("\(option.name): cache cleared successfully.", level: .success)
+                }
+            } catch is CancellationError {
+                appendLog("\(option.name): cache clear cancelled.", level: .warning)
+                break
+            } catch let error as ProcessError where error.isCancellation {
+                appendLog("\(option.name): cache clear cancelled.", level: .warning)
+                break
+            } catch {
+                failedCount += 1
+                appendLog("\(option.name): cache clear failed — \(error.userMessage)", level: .error)
+            }
+            completed += 1
+        }
+
+        if Task.isCancelled {
+            appendLog("Cache cleanup cancelled.", level: .warning)
+        } else {
+            let freedFormatted = SourceSupport.formatBytes(totalBytesFreed)
+            appendLog("Cache cleanup completed (\(succeededCount) succeeded, \(failedCount) failed). Total space freed: \(freedFormatted).", level: failedCount > 0 ? .warning : .success)
+        }
+
+        operation = .idle
+        activeTask = nil
+        completedOperations += 1
     }
 
     func setSourceEnabled(_ option: SourceOption, enabled: Bool) {
@@ -736,6 +853,13 @@ final class AppViewModel {
     private static func ignoreKey(for package: PackageUpdate, versionOnly: Bool) -> String {
         let packageKey = "\(package.sourceID.rawValue):\(package.packageID)"
         return versionOnly ? "\(packageKey)@\(package.availableVersion)" : packageKey
+    }
+
+    static var appVersion: String {
+        if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String, !version.isEmpty {
+            return version
+        }
+        return "1.7.2"
     }
 
     static func displayName(forIgnoreKey key: String) -> String {

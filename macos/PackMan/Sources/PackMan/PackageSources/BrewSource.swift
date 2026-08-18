@@ -127,6 +127,60 @@ struct BrewSource: PackageSource {
             onOutput: onOutput)
         guard result.succeeded else { throw SourceSupport.commandFailure("brew upgrade", result: result) }
     }
+
+    func clearCache(
+        context: ToolContext,
+        onOutput: @escaping @Sendable (ProcessOutputEvent) async -> Void
+    ) async throws -> Int64 {
+        let homebrewCacheURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/Homebrew")
+        let sizeBefore = SourceSupport.directorySize(at: homebrewCacheURL)
+        var outputLines: [String] = []
+
+        let result = try await runner.run(
+            context.executablePath,
+            ["cleanup"],
+            timeout: 300,
+            environment: SourceSupport.environment(
+                pathEntries: context.pathEntries,
+                additions: ["HOMEBREW_NO_AUTO_UPDATE": "1"]),
+            onOutput: { event in
+                if event.stream == .stdout {
+                    outputLines.append(event.line)
+                }
+                await onOutput(event)
+            })
+        guard result.succeeded else { throw SourceSupport.commandFailure("brew cleanup", result: result) }
+
+        let sizeAfter = SourceSupport.directorySize(at: homebrewCacheURL)
+        let delta = max(0, sizeBefore - sizeAfter)
+        if delta > 0 { return delta }
+        return parseFreedBytes(from: outputLines)
+    }
+
+    private func parseFreedBytes(from lines: [String]) -> Int64 {
+        for line in lines {
+            if line.contains("freed approximately"), let bytes = parseSpaceString(line) {
+                return bytes
+            }
+        }
+        return 0
+    }
+
+    private func parseSpaceString(_ line: String) -> Int64? {
+        let pattern = try? NSRegularExpression(pattern: "freed approximately\\s+([0-9.]+)\\s*(GB|MB|KB|B)", options: .caseInsensitive)
+        let nsLine = line as NSString
+        guard let match = pattern?.firstMatch(in: line, range: NSRange(location: 0, length: nsLine.length)),
+              match.numberOfRanges == 3 else { return nil }
+        let numStr = nsLine.substring(with: match.range(at: 1))
+        let unit = nsLine.substring(with: match.range(at: 2)).uppercased()
+        guard let value = Double(numStr) else { return nil }
+        switch unit {
+        case "GB": return Int64(value * 1_073_741_824)
+        case "MB": return Int64(value * 1_048_576)
+        case "KB": return Int64(value * 1_024)
+        default: return Int64(value)
+        }
+    }
 }
 
 protocol BrewRefreshing: Sendable {

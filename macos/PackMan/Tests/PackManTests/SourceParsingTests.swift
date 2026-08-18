@@ -343,6 +343,90 @@ final class SourceParsingTests: XCTestCase {
         XCTAssertEqual(report.issues.count, 1)
         XCTAssertTrue(report.issues[0].message.contains("black"))
     }
+
+    func testBrewClearCacheRunsCleanup() async throws {
+        let runner = StubProcessRunner()
+        await runner.enqueue(
+            arguments: ["cleanup"],
+            stub: .init(result: ProcessResult(exitCode: 0, stdout: "Cleaned up", stderr: "")))
+        let source = BrewSource(kind: .formula, runner: runner, resolver: StubResolver(resolution: .notFound))
+        try await source.clearCache(context: testToolContext) { _ in }
+        let invocations = await runner.invocations
+        XCTAssertEqual(invocations.last?.arguments, ["cleanup"])
+    }
+
+    func testNpmClearCacheRunsCacheCleanForce() async throws {
+        let runner = StubProcessRunner()
+        await runner.enqueue(
+            arguments: ["cache", "clean", "--force"],
+            stub: .init(result: ProcessResult(exitCode: 0, stdout: "", stderr: "")))
+        let source = NpmSource(runner: runner, resolver: StubResolver(resolution: .notFound))
+        try await source.clearCache(context: testToolContext) { _ in }
+        let invocations = await runner.invocations
+        XCTAssertEqual(invocations.last?.arguments, ["cache", "clean", "--force"])
+    }
+
+    func testPipClearCacheRunsCachePurge() async throws {
+        let runner = StubProcessRunner()
+        await runner.enqueue(
+            arguments: ["-m", "pip", "cache", "purge"],
+            stub: .init(result: ProcessResult(exitCode: 0, stdout: "Files removed", stderr: "")))
+        let source = PipSource(runner: runner, resolver: StubResolver(resolution: .notFound))
+        try await source.clearCache(context: testToolContext) { _ in }
+        let invocations = await runner.invocations
+        XCTAssertEqual(invocations.last?.arguments, ["-m", "pip", "cache", "purge"])
+    }
+
+    func testPipxClearCacheRunsCachePurge() async throws {
+        let runner = StubProcessRunner()
+        await runner.enqueue(
+            arguments: ["cache", "purge"],
+            stub: .init(result: ProcessResult(exitCode: 0, stdout: "", stderr: "")))
+        let source = PipxSource(runner: runner, resolver: StubResolver(resolution: .notFound), httpClient: StubHTTPClient())
+        try await source.clearCache(context: testToolContext) { _ in }
+        let invocations = await runner.invocations
+        XCTAssertEqual(invocations.last?.arguments, ["cache", "purge"])
+    }
+
+    func testDotnetClearCacheRunsNugetLocalsAllClear() async throws {
+        let runner = StubProcessRunner()
+        await runner.enqueue(
+            arguments: ["nuget", "locals", "all", "--clear"],
+            stub: .init(result: ProcessResult(exitCode: 0, stdout: "Clearing NuGet cache", stderr: "")))
+        let source = DotnetSource(runner: runner, resolver: StubResolver(resolution: .notFound), httpClient: StubHTTPClient())
+        try await source.clearCache(context: testToolContext) { _ in }
+        let invocations = await runner.invocations
+        XCTAssertEqual(invocations.last?.arguments, ["nuget", "locals", "all", "--clear"])
+    }
+
+    func testMasClearCacheLogsAutomaticManagement() async throws {
+        let runner = StubProcessRunner()
+        let source = MasSource(runner: runner, resolver: StubResolver(resolution: .notFound))
+        var outputLines: [String] = []
+        let freed = try await source.clearCache(context: masToolContext(executablePath: "/opt/homebrew/bin/mas")) { event in
+            outputLines.append(event.line)
+        }
+        XCTAssertEqual(freed, 0)
+        XCTAssertTrue(outputLines.contains { $0.contains("automatically by macOS") })
+        let invocations = await runner.invocations
+        XCTAssertTrue(invocations.isEmpty, "Mas clearCache must not run mas reset or terminate system processes")
+    }
+
+    func testMasScanSurfacesNetworkTimeoutAsIssue() async throws {
+        let runner = StubProcessRunner()
+        let stderr = """
+        Error: Error Domain=NSURLErrorDomain Code=-1001 "The request timed out." UserInfo={NSErrorFailingURLKey=https://itunes.apple.com/lookup?media=software&entity=desktopSoftware&country=AU&bundleId=com.apple.pixelmator}
+        """
+        await runner.enqueue(
+            arguments: ["outdated"],
+            stub: .init(result: ProcessResult(exitCode: 1, stdout: "", stderr: stderr)))
+        let source = MasSource(runner: runner, resolver: StubResolver(resolution: .notFound))
+        let report = try await source.scan(context: masToolContext(executablePath: "/opt/homebrew/bin/mas")) { _ in }
+        XCTAssertTrue(report.updates.isEmpty)
+        XCTAssertEqual(report.issues.count, 1)
+        XCTAssertEqual(report.issues.first?.kind, .network)
+        XCTAssertTrue(report.issues.first?.message.contains("com.apple.pixelmator") == true)
+    }
 }
 
 private func masToolContext(executablePath: String, version: String = "7.0.0") -> ToolContext {

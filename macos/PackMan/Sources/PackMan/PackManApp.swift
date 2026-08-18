@@ -22,6 +22,29 @@ struct PackManApp: App {
                 .keyboardShortcut(",", modifiers: .command)
             }
 
+            CommandMenu("Sources") {
+                Button("Configure Sources…") {
+                    viewModel.isSourcesSheetPresented = true
+                }
+
+                Divider()
+
+                Button("Clear Cache for All Sources") {
+                    viewModel.startClearAllCaches()
+                }
+                .keyboardShortcut("c", modifiers: [.command, .shift])
+                .disabled(viewModel.isBusy)
+
+                Menu("Clear Cache for") {
+                    ForEach(viewModel.sourceOptions) { option in
+                        Button(option.name) {
+                            viewModel.startClearCacheSingle(option)
+                        }
+                        .disabled(viewModel.isBusy || !option.isEnabled)
+                    }
+                }
+            }
+
             CommandMenu("Packages") {
                 Button(viewModel.isBusy ? "Cancel Operation" : "Scan for Updates") {
                     viewModel.isBusy ? viewModel.cancelOperation() : viewModel.startScan()

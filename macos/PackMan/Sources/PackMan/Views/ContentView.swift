@@ -32,10 +32,11 @@ struct ContentView: View {
             Divider()
             FooterView(viewModel: viewModel)
         }
+        .searchable(text: $viewModel.searchText, prompt: "Filter packages…")
         .toolbar { toolbarContent }
         .sheet(isPresented: $viewModel.isSourcesSheetPresented) {
             SourcesView(viewModel: viewModel)
-                .frame(minWidth: 620, minHeight: 430)
+                .frame(minWidth: 640, minHeight: 450)
         }
         .onChange(of: viewModel.sortOrder) { _, _ in
             viewModel.applySort()
@@ -56,11 +57,12 @@ struct ContentView: View {
     }
 
     private var shouldShowTable: Bool {
-        !viewModel.packages.isEmpty
+        !viewModel.filteredPackages.isEmpty
     }
 
     private var isScanning: Bool {
         if case .scanning = viewModel.operation { return true }
+        if case .clearingCache = viewModel.operation { return true }
         if case .cancelling = viewModel.operation,
            viewModel.sourceOptions.contains(where: { state in
                if case .scanning = state.scanState { return true }
@@ -125,14 +127,35 @@ struct ContentView: View {
         }
 
         ToolbarItem(placement: .primaryAction) {
-            Button {
-                viewModel.isSourcesSheetPresented = true
+            Menu {
+                Button("Configure Sources…") {
+                    viewModel.isSourcesSheetPresented = true
+                }
+
+                Divider()
+
+                Button {
+                    viewModel.startClearAllCaches()
+                } label: {
+                    Label("Clear All Caches", systemImage: "broom.fill")
+                }
+                .disabled(viewModel.isBusy)
+                .keyboardShortcut("c", modifiers: [.command, .shift])
+
+                Menu("Clear Cache for") {
+                    ForEach(viewModel.sourceOptions) { option in
+                        Button(option.name) {
+                            viewModel.startClearCacheSingle(option)
+                        }
+                        .disabled(viewModel.isBusy || !option.isEnabled)
+                    }
+                }
             } label: {
                 Label("Sources", systemImage: viewModel.issueSources.isEmpty
                     ? "line.3.horizontal.decrease.circle"
                     : "exclamationmark.triangle")
             }
-            .help("Configure sources and executable locations")
+            .help("Configure sources and clear package manager caches")
             .accessibilityIdentifier("sourcesButton")
         }
 
@@ -148,6 +171,38 @@ struct ContentView: View {
 
     private var updateButtonTitle: String {
         viewModel.selectedCount > 0 ? "Update \(viewModel.selectedCount)" : "Update Selected"
+    }
+}
+
+private struct PackageSourceIcon: View {
+    let sourceID: SourceID
+
+    var body: some View {
+        Image(systemName: iconName)
+            .font(.caption)
+            .foregroundStyle(iconColor)
+    }
+
+    private var iconName: String {
+        switch sourceID {
+        case .homebrew, .homebrewCasks: return "cup.and.saucer.fill"
+        case .appStore: return "app.badge.fill"
+        case .npm: return "shippingbox.fill"
+        case .pip: return "doc.text.fill"
+        case .pipx: return "terminal.fill"
+        case .dotnet: return "square.stack.3d.up.fill"
+        }
+    }
+
+    private var iconColor: Color {
+        switch sourceID {
+        case .homebrew, .homebrewCasks: return .orange
+        case .appStore: return .blue
+        case .npm: return .red
+        case .pip: return .teal
+        case .pipx: return .indigo
+        case .dotnet: return .purple
+        }
     }
 }
 
@@ -193,11 +248,14 @@ private struct PackageTable: View {
                         .accessibilityIdentifier("package-\(package.sourceID.rawValue)-\(package.packageID)")
                 }
                 TableColumn("Source", sortUsing: PackageSortComparator(field: .source)) { package in
-                    Text(package.source)
-                        .lineLimit(1)
-                        .help(package.source)
+                    HStack(spacing: 6) {
+                        PackageSourceIcon(sourceID: package.sourceID)
+                        Text(package.source)
+                            .lineLimit(1)
+                    }
+                    .help(package.source)
                 }
-                .width(min: 90, ideal: 115, max: 150)
+                .width(min: 100, ideal: 125, max: 160)
                 TableColumn("Current", sortUsing: PackageSortComparator(field: .currentVersion)) { package in
                     Text(package.currentVersion)
                         .lineLimit(1)
@@ -213,9 +271,9 @@ private struct PackageTable: View {
                 TableColumn("Status", sortUsing: PackageSortComparator(field: .status)) { package in
                     StatusCell(status: package.status, packageName: package.name)
                 }
-                .width(min: 100, ideal: 120, max: 170)
+                .width(min: 110, ideal: 130, max: 180)
             } rows: {
-                ForEach(viewModel.packages) { package in
+                ForEach(viewModel.filteredPackages) { package in
                     TableRow(package)
                         .contextMenu {
                             Button {
@@ -224,6 +282,15 @@ private struct PackageTable: View {
                                 Label(contextActionTitle(for: package), systemImage: contextActionIcon(for: package))
                             }
                             .disabled(viewModel.isBusy || !package.isActionable)
+
+                            Button {
+                                if let option = viewModel.sourceOptions.first(where: { $0.id == package.sourceID }) {
+                                    viewModel.startClearCacheSingle(option)
+                                }
+                            } label: {
+                                Label("Clear Cache for \(package.source)", systemImage: "broom")
+                            }
+                            .disabled(viewModel.isBusy)
 
                             Divider()
 
@@ -306,8 +373,13 @@ private struct StatusCell: View {
             HStack(spacing: 5) {
                 statusIcon
                 Text(status.title)
+                    .font(.caption)
+                    .fontWeight(.medium)
                     .lineLimit(1)
             }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2.5)
+            .background(color.opacity(0.12), in: Capsule())
             .foregroundStyle(color)
         }
         .buttonStyle(.plain)
@@ -361,8 +433,11 @@ private struct SourceProgressView: View {
                 ForEach(options) { option in
                     GridRow {
                         SourceStateIcon(state: option.scanState)
-                        Text(option.name)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        HStack(spacing: 6) {
+                            PackageSourceIcon(sourceID: option.id)
+                            Text(option.name)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         TimelineView(.periodic(from: .now, by: 1)) { _ in
                             Text(progressText(option.scanState))
                                 .foregroundStyle(.secondary)
@@ -426,64 +501,68 @@ private struct EmptyStateView: View {
     @Bindable var viewModel: AppViewModel
 
     var body: some View {
-        switch viewModel.scanSummary {
-        case .notStarted:
-            state(
-                title: "Ready to Scan",
-                systemImage: "shippingbox.and.arrow.backward",
-                description: "Check your enabled package managers for available updates.",
-                action: "Scan",
-                actionHandler: viewModel.startScan)
-        case .running:
-            ContentUnavailableView(
-                "Scanning Sources",
-                systemImage: "arrow.clockwise",
-                description: Text("Updates will appear as each source completes."))
-        case .updatesAvailable:
-            ContentUnavailableView(
-                "No Displayable Updates",
-                systemImage: "shippingbox",
-                description: Text("Updates found by the last scan are hidden by ignore rules. See Sources → Ignored Updates."))
-        case .updatesCompleted(let date):
-            state(
-                title: "Updates Completed",
-                systemImage: "checkmark.circle",
-                description: "The selected packages were updated and verified at \(date.formatted(date: .omitted, time: .shortened)).",
-                action: "Scan Again",
-                actionHandler: viewModel.startScan)
-        case .upToDate(let date):
-            state(
-                title: "System is Up to Date",
-                systemImage: "checkmark.circle",
-                description: "Every enabled source completed successfully. Last scanned \(date.formatted(date: .omitted, time: .shortened)).",
-                action: "Scan Again",
-                actionHandler: viewModel.startScan)
-        case .completedWithIssues:
-            state(
-                title: "Scan Completed with Issues",
-                systemImage: "exclamationmark.triangle",
-                description: "Some sources could not be checked, so these results may be incomplete.",
-                action: "Retry Issues",
-                actionHandler: viewModel.retryIssues)
-        case .allUnavailable:
-            state(
-                title: "No Sources Could Be Scanned",
-                systemImage: "exclamationmark.triangle",
-                description: "Open Sources to review executable paths and installation guidance.",
-                action: "Retry",
-                actionHandler: viewModel.retryIssues)
-        case .noSources:
-            ContentUnavailableView(
-                "No Sources Selected",
-                systemImage: "line.3.horizontal.decrease.circle",
-                description: Text("Enable at least one package manager in Sources."))
-        case .cancelled:
-            state(
-                title: "Scan Cancelled",
-                systemImage: "xmark.circle",
-                description: "Completed source results were preserved; the result is not a full system check.",
-                action: "Scan Again",
-                actionHandler: viewModel.startScan)
+        if !viewModel.searchText.trimmed.isEmpty {
+            ContentUnavailableView.search(text: viewModel.searchText)
+        } else {
+            switch viewModel.scanSummary {
+            case .notStarted:
+                state(
+                    title: "Ready to Scan",
+                    systemImage: "shippingbox.and.arrow.backward",
+                    description: "Check your enabled package managers for available updates.",
+                    action: "Scan",
+                    actionHandler: viewModel.startScan)
+            case .running:
+                ContentUnavailableView(
+                    "Scanning Sources",
+                    systemImage: "arrow.clockwise",
+                    description: Text("Updates will appear as each source completes."))
+            case .updatesAvailable:
+                ContentUnavailableView(
+                    "No Displayable Updates",
+                    systemImage: "shippingbox",
+                    description: Text("Updates found by the last scan are hidden by ignore rules. See Sources → Ignored Updates."))
+            case .updatesCompleted(let date):
+                state(
+                    title: "Updates Completed",
+                    systemImage: "checkmark.circle",
+                    description: "The selected packages were updated and verified at \(date.formatted(date: .omitted, time: .shortened)).",
+                    action: "Scan Again",
+                    actionHandler: viewModel.startScan)
+            case .upToDate(let date):
+                state(
+                    title: "System is Up to Date",
+                    systemImage: "checkmark.circle",
+                    description: "Every enabled source completed successfully. Last scanned \(date.formatted(date: .omitted, time: .shortened)).",
+                    action: "Scan Again",
+                    actionHandler: viewModel.startScan)
+            case .completedWithIssues:
+                state(
+                    title: "Scan Completed with Issues",
+                    systemImage: "exclamationmark.triangle",
+                    description: "Some sources could not be checked, so these results may be incomplete.",
+                    action: "Retry Issues",
+                    actionHandler: viewModel.retryIssues)
+            case .allUnavailable:
+                state(
+                    title: "No Sources Could Be Scanned",
+                    systemImage: "exclamationmark.triangle",
+                    description: "Open Sources to review executable paths and installation guidance.",
+                    action: "Retry",
+                    actionHandler: viewModel.retryIssues)
+            case .noSources:
+                ContentUnavailableView(
+                    "No Sources Selected",
+                    systemImage: "line.3.horizontal.decrease.circle",
+                    description: Text("Enable at least one package manager in Sources."))
+            case .cancelled:
+                state(
+                    title: "Scan Cancelled",
+                    systemImage: "xmark.circle",
+                    description: "Completed source results were preserved; the result is not a full system check.",
+                    action: "Scan Again",
+                    actionHandler: viewModel.startScan)
+            }
         }
     }
 
@@ -543,6 +622,13 @@ private struct FooterView: View {
                     .foregroundStyle(.orange)
             }
             Text(viewModel.footerText)
+            Text("v\(AppViewModel.appVersion)")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(.quaternary, in: Capsule())
+                .accessibilityIdentifier("appVersionTag")
         }
         .font(.callout)
         .foregroundStyle(.secondary)
@@ -641,11 +727,28 @@ private struct SourcesView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Sources").font(.title2.bold())
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("Sources").font(.title2.bold())
+                        Text("v\(AppViewModel.appVersion)")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(.quaternary, in: Capsule())
+                    }
                     Text("Choose package managers and the executables PackMan should use.")
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+
+                Button {
+                    viewModel.startClearAllCaches()
+                } label: {
+                    Label("Clear All Caches", systemImage: "broom.fill")
+                }
+                .disabled(viewModel.isBusy || viewModel.sourceOptions.allSatisfy { !$0.isEnabled })
+                .padding(.trailing, 8)
+
                 Button("Done") { dismiss() }
                     .keyboardShortcut(.defaultAction)
             }
@@ -717,8 +820,11 @@ private struct SourceSettingsRow: View {
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 6) {
                     SourceStateIcon(state: option.scanState)
-                    Text(sourceStatus)
-                        .foregroundStyle(statusColor)
+                    HStack(spacing: 4) {
+                        PackageSourceIcon(sourceID: option.id)
+                        Text(sourceStatus)
+                            .foregroundStyle(statusColor)
+                    }
                     if let completedAt = option.scanState.completedAt {
                         Text("• Last checked \(completedAt.formatted(date: .omitted, time: .shortened))")
                             .font(.caption)
@@ -765,8 +871,18 @@ private struct SourceSettingsRow: View {
             Spacer(minLength: 8)
 
             VStack(alignment: .trailing, spacing: 6) {
-                Button("Choose…") { chooseExecutable() }
-                    .disabled(viewModel.isBusy)
+                HStack(spacing: 8) {
+                    Button {
+                        viewModel.startClearCacheSingle(option)
+                    } label: {
+                        Label("Clear Cache", systemImage: "broom")
+                    }
+                    .disabled(viewModel.isBusy || !option.isEnabled)
+
+                    Button("Choose…") { chooseExecutable() }
+                        .disabled(viewModel.isBusy)
+                }
+
                 if viewModel.executableOverride(for: option.descriptor.toolID) != nil {
                     Button("Use Automatic") {
                         viewModel.setExecutableOverride(nil, for: option.descriptor.toolID)
