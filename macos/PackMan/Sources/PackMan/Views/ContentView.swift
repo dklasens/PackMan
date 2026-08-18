@@ -127,20 +127,25 @@ struct ContentView: View {
         }
 
         ToolbarItem(placement: .primaryAction) {
+            Button {
+                viewModel.isSourcesSheetPresented = true
+            } label: {
+                Label("Sources", systemImage: viewModel.issueSources.isEmpty
+                    ? "line.3.horizontal.decrease.circle"
+                    : "exclamationmark.triangle")
+            }
+            .help("Configure sources and executable locations")
+            .accessibilityIdentifier("sourcesButton")
+        }
+
+        ToolbarItem(placement: .primaryAction) {
             Menu {
-                Button("Configure Sources…") {
-                    viewModel.isSourcesSheetPresented = true
-                }
-
-                Divider()
-
                 Button {
                     viewModel.startClearAllCaches()
                 } label: {
                     Label("Clear All Caches", systemImage: "broom.fill")
                 }
                 .disabled(viewModel.isBusy)
-                .keyboardShortcut("c", modifiers: [.command, .shift])
 
                 Menu("Clear Cache for") {
                     ForEach(viewModel.sourceOptions) { option in
@@ -151,12 +156,10 @@ struct ContentView: View {
                     }
                 }
             } label: {
-                Label("Sources", systemImage: viewModel.issueSources.isEmpty
-                    ? "line.3.horizontal.decrease.circle"
-                    : "exclamationmark.triangle")
+                Label("Clear Cache", systemImage: "broom")
             }
-            .help("Configure sources and clear package manager caches")
-            .accessibilityIdentifier("sourcesButton")
+            .help("Clear package manager caches")
+            .accessibilityIdentifier("clearCacheMenu")
         }
 
         ToolbarItem(placement: .primaryAction) {
