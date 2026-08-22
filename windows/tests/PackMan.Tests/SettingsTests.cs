@@ -63,6 +63,40 @@ public sealed class SettingsTests
     }
 
     [Fact]
+    public void AppUpdateFieldsRoundTrip()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "PackMan.Tests", Guid.NewGuid().ToString("N"));
+        var current = Path.Combine(root, "settings.json");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var settings = new SettingsService(current);
+            Assert.Null(settings.GetLastAppUpdateCheck());
+            Assert.Null(settings.GetSkippedAppUpdateVersion());
+            Assert.Null(settings.GetAvailableAppUpdate());
+            var checkedAt = new DateTimeOffset(2026, 8, 22, 12, 30, 0, TimeSpan.Zero);
+            settings.SetLastAppUpdateCheck(checkedAt);
+            settings.SetSkippedAppUpdateVersion("1.9.0");
+            settings.SetAvailableAppUpdate(new AppUpdateInfo("1.9.0",
+                "https://example/PackMan-Windows-x64.zip", "https://example/PackMan-Windows-x64.zip.sha256",
+                "https://example/release"));
+            var reloaded = new SettingsService(current);
+            Assert.Equal(checkedAt, reloaded.GetLastAppUpdateCheck());
+            Assert.Equal("1.9.0", reloaded.GetSkippedAppUpdateVersion());
+            var update = reloaded.GetAvailableAppUpdate();
+            Assert.NotNull(update);
+            Assert.Equal("1.9.0", update!.Version);
+            Assert.Equal("https://example/PackMan-Windows-x64.zip", update.DownloadUrl);
+            reloaded.SetSkippedAppUpdateVersion(null);
+            reloaded.SetAvailableAppUpdate(null);
+            var cleared = new SettingsService(current);
+            Assert.Null(cleared.GetSkippedAppUpdateVersion());
+            Assert.Null(cleared.GetAvailableAppUpdate());
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
     public void IgnoredUpdatesRoundTrip()
     {
         var root = Path.Combine(Path.GetTempPath(), "PackMan.Tests", Guid.NewGuid().ToString("N"));

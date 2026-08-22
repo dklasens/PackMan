@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-for required_tool in xcodebuild xcode-select codesign ditto plutil lipo shasum; do
+for required_tool in xcodebuild xcode-select codesign ditto plutil lipo shasum hdiutil; do
     if ! command -v "$required_tool" >/dev/null 2>&1; then
         echo "error: '$required_tool' is required." >&2
         exit 1
@@ -21,7 +21,7 @@ case "$DEVELOPER_DIR" in
         ;;
 esac
 
-VERSION="${PACKMAN_VERSION:-1.7.2}"
+VERSION="${PACKMAN_VERSION:-1.8.0}"
 BUILD_NUMBER="${PACKMAN_BUILD_NUMBER:-1}"
 ARCHITECTURES="${PACKMAN_ARCHS:-arm64 x86_64}"
 BUILD_ROOT="${PACKMAN_BUILD_ROOT:-$SCRIPT_DIR/.build/xcode-release}"
@@ -30,6 +30,8 @@ SOURCE_APP="$BUILD_ROOT/Build/Products/Release/PackMan.app"
 APP="$OUTPUT_DIR/PackMan.app"
 ARCHIVE="$OUTPUT_DIR/PackMan-macOS.zip"
 CHECKSUM="$ARCHIVE.sha256"
+DISK_IMAGE="$OUTPUT_DIR/PackMan-macOS.dmg"
+DISK_IMAGE_CHECKSUM="$DISK_IMAGE.sha256"
 
 if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
     echo "error: PACKMAN_VERSION must contain one to three numeric components (for example, 1.2.3)." >&2
@@ -63,7 +65,7 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 rm -rf "$APP"
-rm -f "$ARCHIVE" "$CHECKSUM"
+rm -f "$ARCHIVE" "$CHECKSUM" "$DISK_IMAGE" "$DISK_IMAGE_CHECKSUM"
 ditto "$SOURCE_APP" "$APP"
 
 echo "Applying an ad-hoc signature (no Apple Developer account required)..."
@@ -79,11 +81,24 @@ fi
 
 lipo -info "$APP/Contents/MacOS/PackMan"
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$ARCHIVE"
+
+echo "Creating the disk image..."
+DMG_STAGING="$(mktemp -d)"
+trap 'rm -rf "$DMG_STAGING"' EXIT
+ditto "$APP" "$DMG_STAGING/PackMan.app"
+ln -s /Applications "$DMG_STAGING/Applications"
+hdiutil create -quiet -volname "PackMan" -srcfolder "$DMG_STAGING" -fs HFS+ -format UDZO "$DISK_IMAGE"
+rm -rf "$DMG_STAGING"
+trap - EXIT
+
 (
     cd "$OUTPUT_DIR"
     shasum -a 256 "$(basename "$ARCHIVE")" > "$(basename "$CHECKSUM")"
+    shasum -a 256 "$(basename "$DISK_IMAGE")" > "$(basename "$DISK_IMAGE_CHECKSUM")"
 )
 
 echo "Created: $APP"
 echo "Created: $ARCHIVE"
 echo "Checksum: $CHECKSUM"
+echo "Created: $DISK_IMAGE"
+echo "Checksum: $DISK_IMAGE_CHECKSUM"

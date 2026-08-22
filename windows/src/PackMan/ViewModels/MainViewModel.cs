@@ -15,17 +15,20 @@ public partial class MainViewModel : ObservableObject
     private readonly IReadOnlyList<IPackageSource> _sources;
     private readonly ISettingsService _settings;
     private readonly ISourceInstaller _installer;
+    private readonly IAppUpdateService? _updater;
     private CancellationTokenSource? _operationCts;
     private Task? _activeTask;
     private long _nextLogId;
+    private bool _isCheckingForUpdates;
     private readonly Dictionary<string, string> _lastOutput = [];
 
     public MainViewModel(IEnumerable<IPackageSource> sources, ISettingsService settings,
-        ISourceInstaller installer)
+        ISourceInstaller installer, IAppUpdateService? updater = null)
     {
         _sources = sources.ToList();
         _settings = settings;
         _installer = installer;
+        _updater = updater;
         SourceOptions = new(_sources.Select(source => new SourceOptionViewModel(
             source, settings.IsSourceEnabled(source.Id), settings.GetExecutableOverride(source.Descriptor.ToolId),
             installer.HasPlan(source.Id))));
@@ -52,8 +55,10 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private string? _currentItem;
     [ObservableProperty] private DateTimeOffset? _lastScanCompletedAt;
     [ObservableProperty] private string? _cacheCleanupStatus;
+    [ObservableProperty] private AppUpdateInfo? _availableUpdate;
 
     public bool IsBusy => Operation != AppOperationKind.Idle;
+    public bool IsApplyingAppUpdate => Operation == AppOperationKind.UpdatingApp;
     public int UpdateCount => Packages.Count(p => p.IsActionable);
     public int SelectedCount => Packages.Count(p => p.IsActionable && p.IsSelected);
     public bool CanUpdate => !IsBusy && SelectedCount > 0;
@@ -65,6 +70,10 @@ public partial class MainViewModel : ObservableObject
     public bool ShowSourceProgress => Operation is AppOperationKind.Scanning or AppOperationKind.Cancelling
         && SourceOptions.Any(o => o.State.Status is SourceScanStatus.Probing or SourceScanStatus.Scanning or SourceScanStatus.Waiting);
     public bool HasCacheCleanupStatus => !string.IsNullOrWhiteSpace(CacheCleanupStatus);
+    public bool ShowAppUpdateBanner => AvailableUpdate is not null;
+    public bool CanInstallAppUpdate => !IsBusy && AvailableUpdate is not null;
+    public string AppUpdateText => AvailableUpdate is null ? string.Empty
+        : $"PackMan {AvailableUpdate.Version} is available (you have {VersionText}).";
     public string ScanButtonText => IsBusy ? (Operation == AppOperationKind.Cancelling ? "Cancelling" : "Cancel") : "Scan";
     public string UpdateButtonText => SelectedCount > 0 ? $"Update {SelectedCount}" : "Update Selected";
     public string LogButtonText => IsLogVisible ? "Hide Log" : "Show Log";
@@ -76,6 +85,8 @@ public partial class MainViewModel : ObservableObject
         + (LastScanCompletedAt is { } scannedAt ? $" • Last scan {scannedAt:HH:mm}" : string.Empty);
     public string StatusText => Operation == AppOperationKind.CleaningCache
         ? CacheCleanupStatus ?? "Clearing package caches…"
+        : Operation == AppOperationKind.UpdatingApp
+        ? $"Installing PackMan {AvailableUpdate?.Version}…"
         : ScanSummary switch
         {
             ScanSummaryKind.NotStarted => "Ready. Scan enabled sources for updates.",
@@ -257,6 +268,9 @@ public partial class MainViewModel : ObservableObject
         MessageBox.Show(message, "PackMan", MessageBoxButton.OK, MessageBoxImage.Information);
     internal Func<string, bool> ConfirmCacheClear { get; set; } = message =>
         MessageBox.Show(message, "PackMan", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes;
+    internal Func<string, bool> ConfirmAppUpdate { get; set; } = message =>
+        MessageBox.Show(message, "PackMan", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes;
+    internal Action ShutdownApp { get; set; } = () => Application.Current?.Shutdown();
 
     [RelayCommand]
     private async Task InstallSource(SourceOptionViewModel? option)
@@ -463,6 +477,97 @@ public partial class MainViewModel : ObservableObject
             ? $"Cleared {cleared}; skipped {skipped}; failed {failed}. Open the main log for details."
             : $"Cache cleanup complete: {cleared} cleared" + (skipped > 0 ? $"; {skipped} unavailable" : string.Empty) + ".";
         AppendLog(CacheCleanupStatus, failed > 0 ? LogLevel.Warning : LogLevel.Success);
+    }
+
+    public void BeginStartupUpdateCheck()
+    {
+        if (_updater is null || _isCheckingForUpdates) return;
+        _ = CheckForUpdatesCoreAsync(force: false);
+    }
+
+    [RelayCommand]
+    private void CheckForUpdates()
+    {
+        if (_updater is null || _isCheckingForUpdates) return;
+        _ = CheckForUpdatesCoreAsync(force: true);
+    }
+
+    private async Task CheckForUpdatesCoreAsync(bool force)
+    {
+        _isCheckingForUpdates = true;
+        try
+        {
+            var update = await _updater!.CheckAsync(force);
+            if (update is not null)
+            {
+                AvailableUpdate = update;
+                AppendLog($"PackMan {update.Version} is available; use the banner to install it.", LogLevel.Success);
+            }
+            else if (force)
+            {
+                AppendLog("PackMan is up to date.");
+            }
+        }
+        catch (Exception ex)
+        {
+            if (force) AppendLog($"Update check failed — {ex.Message}", LogLevel.Warning);
+        }
+        finally
+        {
+            _isCheckingForUpdates = false;
+        }
+    }
+
+    [RelayCommand(CanExecute = nameof(CanInstallAppUpdate))]
+    private void InstallUpdate()
+    {
+        if (AvailableUpdate is null || _updater is null || IsBusy) return;
+        var update = AvailableUpdate;
+        if (!ConfirmAppUpdate($"Download and install PackMan {update.Version}?\n\n"
+            + "PackMan closes while the update is applied and restarts automatically.")) return;
+        StartOperation(ct => RunAppUpdateAsync(update, ct));
+    }
+
+    private async Task RunAppUpdateAsync(AppUpdateInfo update, CancellationToken cancellationToken)
+    {
+        Operation = AppOperationKind.UpdatingApp;
+        CurrentItem = update.Version;
+        IsLogVisible = true;
+        AppendLog($"Updating PackMan to {update.Version}.");
+        var progress = new Progress<string>(message => AppendLog(message));
+        try
+        {
+            await _updater!.ApplyAsync(update, progress, cancellationToken);
+            AppendLog($"PackMan {update.Version} is staged; restarting…", LogLevel.Success);
+            ShutdownApp();
+        }
+        catch (ElevationDeclinedException ex)
+        {
+            AppendLog(ex.Message, LogLevel.Warning);
+        }
+        catch (OperationCanceledException)
+        {
+            AppendLog("The PackMan update was cancelled.", LogLevel.Warning);
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"The PackMan update failed — {ex.Message}", LogLevel.Error);
+        }
+    }
+
+    [RelayCommand]
+    private void SkipUpdate()
+    {
+        if (AvailableUpdate is null) return;
+        try
+        {
+            _settings.SetSkippedAppUpdateVersion(AvailableUpdate.Version);
+            _settings.SetAvailableAppUpdate(null);
+            AppendLog($"PackMan {AvailableUpdate.Version} will not be offered again.", LogLevel.Info);
+            AvailableUpdate = null;
+        }
+        catch (Exception ex) { AppendLog($"Could not save the skipped version: {ex.Message}", LogLevel.Error); }
+        RefreshComputed();
     }
 
     private void StartUpdates(IReadOnlyList<(PackageUpdate Package, bool Elevated)> packages)
@@ -895,6 +1000,9 @@ public partial class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(ShowIssueBanner));
         OnPropertyChanged(nameof(ShowSourceProgress));
         OnPropertyChanged(nameof(HasCacheCleanupStatus));
+        OnPropertyChanged(nameof(ShowAppUpdateBanner));
+        OnPropertyChanged(nameof(CanInstallAppUpdate));
+        OnPropertyChanged(nameof(AppUpdateText));
         OnPropertyChanged(nameof(ScanButtonText));
         OnPropertyChanged(nameof(UpdateButtonText));
         OnPropertyChanged(nameof(LogButtonText));
@@ -903,9 +1011,11 @@ public partial class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(EmptyTitle));
         OnPropertyChanged(nameof(EmptyDescription));
         UpdateSelectedCommand.NotifyCanExecuteChanged();
+        InstallUpdateCommand.NotifyCanExecuteChanged();
     }
 
     partial void OnOperationChanged(AppOperationKind value) => RefreshComputed();
+    partial void OnAvailableUpdateChanged(AppUpdateInfo? value) => RefreshComputed();
     partial void OnScanSummaryChanged(ScanSummaryKind value) => RefreshComputed();
     partial void OnIsLogVisibleChanged(bool value) => RefreshComputed();
     partial void OnOperationCompletedChanged(int value) => OnPropertyChanged(nameof(StatusText));

@@ -13,6 +13,12 @@ public interface ISettingsService
     void SetCachedContext(SourceId id, ToolContext? context);
     IReadOnlySet<string> GetIgnoredUpdates();
     void SetUpdateIgnored(string key, bool ignored);
+    DateTimeOffset? GetLastAppUpdateCheck();
+    void SetLastAppUpdateCheck(DateTimeOffset? checkedAt);
+    string? GetSkippedAppUpdateVersion();
+    void SetSkippedAppUpdateVersion(string? version);
+    AppUpdateInfo? GetAvailableAppUpdate();
+    void SetAvailableAppUpdate(AppUpdateInfo? update);
 }
 
 public sealed class SettingsService : ISettingsService
@@ -108,6 +114,60 @@ public sealed class SettingsService : ISettingsService
         }
     }
 
+    public DateTimeOffset? GetLastAppUpdateCheck()
+    {
+        lock (_sync) return _data.LastAppUpdateCheck;
+    }
+
+    public void SetLastAppUpdateCheck(DateTimeOffset? checkedAt)
+    {
+        lock (_sync)
+        {
+            _data.LastAppUpdateCheck = checkedAt;
+            SaveLocked();
+        }
+    }
+
+    public string? GetSkippedAppUpdateVersion()
+    {
+        lock (_sync) return _data.SkippedAppUpdateVersion;
+    }
+
+    public void SetSkippedAppUpdateVersion(string? version)
+    {
+        lock (_sync)
+        {
+            _data.SkippedAppUpdateVersion = string.IsNullOrWhiteSpace(version) ? null : version;
+            SaveLocked();
+        }
+    }
+
+    public AppUpdateInfo? GetAvailableAppUpdate()
+    {
+        lock (_sync) return _data.AvailableAppUpdate is { } update
+            && !string.IsNullOrWhiteSpace(update.Version)
+            && !string.IsNullOrWhiteSpace(update.DownloadUrl)
+            && !string.IsNullOrWhiteSpace(update.ChecksumUrl)
+            && !string.IsNullOrWhiteSpace(update.ReleaseUrl)
+            ? new AppUpdateInfo(update.Version, update.DownloadUrl, update.ChecksumUrl, update.ReleaseUrl)
+            : null;
+    }
+
+    public void SetAvailableAppUpdate(AppUpdateInfo? update)
+    {
+        lock (_sync)
+        {
+            _data.AvailableAppUpdate = update is null ? null : new AppUpdateData
+            {
+                Version = update.Version,
+                DownloadUrl = update.DownloadUrl,
+                ChecksumUrl = update.ChecksumUrl,
+                ReleaseUrl = update.ReleaseUrl,
+            };
+            SaveLocked();
+        }
+    }
+
     private void Load(string? legacySettingsPath)
     {
         try
@@ -135,7 +195,7 @@ public sealed class SettingsService : ISettingsService
 
     private void Normalize()
     {
-        _data.Version = 4;
+        _data.Version = 5;
         _data.DisabledSources ??= [];
         _data.ExecutableOverrides ??= new(StringComparer.OrdinalIgnoreCase);
         _data.CachedTools ??= new(StringComparer.OrdinalIgnoreCase);
@@ -147,7 +207,7 @@ public sealed class SettingsService : ISettingsService
         var directory = Path.GetDirectoryName(_settingsPath)!;
         Directory.CreateDirectory(directory);
         var temporary = _settingsPath + ".tmp";
-        _data.Version = 4;
+        _data.Version = 5;
         File.WriteAllText(temporary, JsonSerializer.Serialize(_data, JsonOptions));
         File.Move(temporary, _settingsPath, true);
         LoadIssue = null;
@@ -174,11 +234,21 @@ public sealed class SettingsService : ISettingsService
 
     private sealed class SettingsData
     {
-        public int Version { get; set; } = 4;
+        public int Version { get; set; } = 5;
         public List<string> DisabledSources { get; set; } = [];
         public Dictionary<string, string> ExecutableOverrides { get; set; } = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, CachedToolData> CachedTools { get; set; } = new(StringComparer.OrdinalIgnoreCase);
         public List<string> IgnoredUpdates { get; set; } = [];
+        public DateTimeOffset? LastAppUpdateCheck { get; set; }
+        public string? SkippedAppUpdateVersion { get; set; }
+        public AppUpdateData? AvailableAppUpdate { get; set; }
+    }
+    private sealed class AppUpdateData
+    {
+        public string? Version { get; set; }
+        public string? DownloadUrl { get; set; }
+        public string? ChecksumUrl { get; set; }
+        public string? ReleaseUrl { get; set; }
     }
     private sealed class CachedToolData
     {

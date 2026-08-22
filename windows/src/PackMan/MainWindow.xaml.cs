@@ -39,7 +39,7 @@ public partial class MainWindow : FluentWindow
 
     protected override void OnClosing(CancelEventArgs e)
     {
-        if (_viewModel.IsBusy)
+        if (_viewModel.IsBusy && !_viewModel.IsApplyingAppUpdate)
         {
             var result = System.Windows.MessageBox.Show(this,
                 "A scan or update is still running. Cancel it and close PackMan?", "PackMan",

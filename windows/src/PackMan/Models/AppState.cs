@@ -46,7 +46,7 @@ public partial class SourceState : ObservableObject
     }
 }
 
-public enum AppOperationKind { Idle, Scanning, Updating, Installing, CleaningCache, Cancelling }
+public enum AppOperationKind { Idle, Scanning, Updating, Installing, CleaningCache, Cancelling, UpdatingApp }
 public enum ScanSummaryKind
 {
     NotStarted,

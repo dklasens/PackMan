@@ -27,6 +27,11 @@ public partial class App : Application
             Shutdown(exitCode);
             return;
         }
+        if (UpdateApplier.IsApplyMode(e.Args))
+        {
+            Shutdown(await UpdateApplier.RunAsync(e.Args));
+            return;
+        }
 
         var services = new ServiceCollection();
         services.AddSingleton<IElevationBroker, ElevationBroker>();
@@ -42,6 +47,7 @@ public partial class App : Application
         else
         {
             services.AddSingleton<ISettingsService, SettingsService>();
+            services.AddSingleton<IAppUpdateService, AppUpdateService>();
             services.AddSingleton<IPackageSource, WingetSource>();
             services.AddSingleton<IPackageSource, ChocoSource>();
             services.AddSingleton<IPackageSource, ScoopSource>();
@@ -61,9 +67,13 @@ public partial class App : Application
         window.Show();
         base.OnStartup(e);
 
-        if (LaunchDiagnostics && window.DataContext is MainViewModel viewModel)
-            viewModel.LogLaunchDiagnostic(
-                $"Launch: services {servicesMs} ms, window shown {ElapsedMilliseconds(launchStart)} ms.");
+        if (window.DataContext is MainViewModel viewModel)
+        {
+            viewModel.BeginStartupUpdateCheck();
+            if (LaunchDiagnostics)
+                viewModel.LogLaunchDiagnostic(
+                    $"Launch: services {servicesMs} ms, window shown {ElapsedMilliseconds(launchStart)} ms.");
+        }
     }
 
     protected override void OnExit(ExitEventArgs e)

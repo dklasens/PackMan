@@ -438,6 +438,129 @@ public sealed class ViewModelTests
         Assert.Null(vm.CacheCleanupStatus);
     }
 
+    [Fact]
+    public async Task StartupUpdateCheckShowsBanner()
+    {
+        var update = new AppUpdateInfo("99.0.0", "u", "c", "r");
+        var updater = new StubAppUpdateService(update);
+        var vm = new MainViewModel([new StubSource(SourceId.Npm, SourceScanReport.Empty)],
+            new MemorySettings(), new StubSourceInstaller(), updater);
+        vm.BeginStartupUpdateCheck();
+        await WaitUntil(() => vm.AvailableUpdate is not null);
+        Assert.True(vm.ShowAppUpdateBanner);
+        Assert.Contains("99.0.0", vm.AppUpdateText);
+        Assert.Equal([false], updater.Checks);
+    }
+
+    [Fact]
+    public async Task ManualCheckReportsUpToDateWhenNoUpdate()
+    {
+        var updater = new StubAppUpdateService(null);
+        var vm = new MainViewModel([new StubSource(SourceId.Npm, SourceScanReport.Empty)],
+            new MemorySettings(), new StubSourceInstaller(), updater);
+        vm.CheckForUpdatesCommand.Execute(null);
+        await WaitUntil(() => vm.LogEntries.Any(e =>
+            e.Message.Contains("up to date", StringComparison.OrdinalIgnoreCase)));
+        Assert.Equal([true], updater.Checks);
+        Assert.False(vm.ShowAppUpdateBanner);
+    }
+
+    [Fact]
+    public async Task InstallUpdateAppliesAndShutsDown()
+    {
+        var update = new AppUpdateInfo("99.0.0", "u", "c", "r");
+        var updater = new StubAppUpdateService(update);
+        var shutdowns = 0;
+        var vm = new MainViewModel([new StubSource(SourceId.Npm, SourceScanReport.Empty)],
+            new MemorySettings(), new StubSourceInstaller(), updater)
+        {
+            ConfirmAppUpdate = _ => true,
+            ShutdownApp = () => shutdowns++,
+        };
+        vm.BeginStartupUpdateCheck();
+        await WaitUntil(() => vm.AvailableUpdate is not null);
+
+        vm.InstallUpdateCommand.Execute(null);
+        await WaitUntilIdle(vm);
+
+        Assert.Equal([update], updater.Applied);
+        Assert.Equal(1, shutdowns);
+        Assert.Contains(vm.LogEntries, entry => entry.Level == LogLevel.Success);
+    }
+
+    [Fact]
+    public async Task InstallUpdateDeclinedDoesNotApply()
+    {
+        var update = new AppUpdateInfo("99.0.0", "u", "c", "r");
+        var updater = new StubAppUpdateService(update);
+        var vm = new MainViewModel([new StubSource(SourceId.Npm, SourceScanReport.Empty)],
+            new MemorySettings(), new StubSourceInstaller(), updater)
+        {
+            ConfirmAppUpdate = _ => false,
+        };
+        vm.BeginStartupUpdateCheck();
+        await WaitUntil(() => vm.AvailableUpdate is not null);
+
+        vm.InstallUpdateCommand.Execute(null);
+        await Task.Delay(50);
+
+        Assert.Empty(updater.Applied);
+        Assert.True(vm.ShowAppUpdateBanner);
+    }
+
+    [Fact]
+    public async Task FailedAppUpdateIsReportedWithoutShutdown()
+    {
+        var update = new AppUpdateInfo("99.0.0", "u", "c", "r");
+        var updater = new StubAppUpdateService(update,
+            _ => Task.FromException(new InvalidOperationException("checksum mismatch")));
+        var shutdowns = 0;
+        var vm = new MainViewModel([new StubSource(SourceId.Npm, SourceScanReport.Empty)],
+            new MemorySettings(), new StubSourceInstaller(), updater)
+        {
+            ConfirmAppUpdate = _ => true,
+            ShutdownApp = () => shutdowns++,
+        };
+        vm.BeginStartupUpdateCheck();
+        await WaitUntil(() => vm.AvailableUpdate is not null);
+
+        vm.InstallUpdateCommand.Execute(null);
+        await WaitUntilIdle(vm);
+
+        Assert.Equal(0, shutdowns);
+        Assert.Contains(vm.LogEntries, entry =>
+            entry.Level == LogLevel.Error && entry.Message.Contains("checksum mismatch"));
+        Assert.True(vm.ShowAppUpdateBanner);
+    }
+
+    [Fact]
+    public async Task SkipUpdatePersistsAndHidesBanner()
+    {
+        var update = new AppUpdateInfo("99.0.0", "u", "c", "r");
+        var settings = new MemorySettings { AvailableAppUpdate = update };
+        var vm = new MainViewModel([new StubSource(SourceId.Npm, SourceScanReport.Empty)],
+            settings, new StubSourceInstaller(), new StubAppUpdateService(update));
+        vm.BeginStartupUpdateCheck();
+        await WaitUntil(() => vm.AvailableUpdate is not null);
+
+        vm.SkipUpdateCommand.Execute(null);
+
+        Assert.False(vm.ShowAppUpdateBanner);
+        Assert.Equal("99.0.0", settings.SkippedAppUpdateVersion);
+        Assert.Null(settings.AvailableAppUpdate);
+    }
+
+    private static async Task WaitUntil(Func<bool> condition)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(3);
+        do
+        {
+            if (condition()) return;
+            await Task.Delay(10);
+        } while (DateTime.UtcNow < deadline);
+        throw new TimeoutException("Condition was not met in time.");
+    }
+
     private static async Task WaitUntilIdle(MainViewModel vm)
     {
         var deadline = DateTime.UtcNow.AddSeconds(3);

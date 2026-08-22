@@ -75,6 +75,32 @@ internal sealed class MemorySettings : ISettingsService
     }
     public IReadOnlySet<string> GetIgnoredUpdates() => _ignored;
     public void SetUpdateIgnored(string key, bool ignored) { if (ignored) _ignored.Add(key); else _ignored.Remove(key); }
+    public DateTimeOffset? LastAppUpdateCheck { get; set; }
+    public string? SkippedAppUpdateVersion { get; set; }
+    public AppUpdateInfo? AvailableAppUpdate { get; set; }
+    public DateTimeOffset? GetLastAppUpdateCheck() => LastAppUpdateCheck;
+    public void SetLastAppUpdateCheck(DateTimeOffset? checkedAt) => LastAppUpdateCheck = checkedAt;
+    public string? GetSkippedAppUpdateVersion() => SkippedAppUpdateVersion;
+    public void SetSkippedAppUpdateVersion(string? version) => SkippedAppUpdateVersion = version;
+    public AppUpdateInfo? GetAvailableAppUpdate() => AvailableAppUpdate;
+    public void SetAvailableAppUpdate(AppUpdateInfo? update) => AvailableAppUpdate = update;
+}
+
+internal sealed class StubAppUpdateService(AppUpdateInfo? available = null,
+    Func<AppUpdateInfo, Task>? apply = null) : IAppUpdateService
+{
+    public List<bool> Checks { get; } = [];
+    public List<AppUpdateInfo> Applied { get; } = [];
+    public Task<AppUpdateInfo?> CheckAsync(bool force = false, CancellationToken cancellationToken = default)
+    {
+        Checks.Add(force);
+        return Task.FromResult(available);
+    }
+    public Task ApplyAsync(AppUpdateInfo update, IProgress<string>? progress, CancellationToken cancellationToken)
+    {
+        Applied.Add(update);
+        return apply?.Invoke(update) ?? Task.CompletedTask;
+    }
 }
 
 internal sealed class StubSourceInstaller : ISourceInstaller

@@ -24,6 +24,12 @@ internal sealed class UiTestSettings : ISettingsService
     public void SetCachedContext(SourceId id, ToolContext? context) { }
     public IReadOnlySet<string> GetIgnoredUpdates() => new HashSet<string>();
     public void SetUpdateIgnored(string key, bool ignored) { }
+    public DateTimeOffset? GetLastAppUpdateCheck() => null;
+    public void SetLastAppUpdateCheck(DateTimeOffset? checkedAt) { }
+    public string? GetSkippedAppUpdateVersion() => null;
+    public void SetSkippedAppUpdateVersion(string? version) { }
+    public AppUpdateInfo? GetAvailableAppUpdate() => null;
+    public void SetAvailableAppUpdate(AppUpdateInfo? update) { }
 }
 
 internal sealed class UiTestPackageSource(string scenario) : IPackageSource

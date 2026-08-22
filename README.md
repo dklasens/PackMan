@@ -35,7 +35,7 @@ Pick which sources to include, hit **Scan**, select the packages you want, and c
 
 ### macOS
 
-Grab `PackMan-macOS.zip` from the [Releases](https://github.com/dklasens/PackMan/releases) page and unzip it. Requires macOS 14+ and supports Apple Silicon and Intel Macs.
+Grab `PackMan-macOS.dmg` (or `PackMan-macOS.zip`) from the [Releases](https://github.com/dklasens/PackMan/releases) page. Open the disk image and drag PackMan to Applications, or unzip the archive. Requires macOS 14+ and supports Apple Silicon and Intel Macs.
 
 The app is ad-hoc signed and cannot be notarized because this project does not use a paid Apple Developer account. macOS will therefore warn that Apple cannot check it for malicious software. After attempting to open it, go to **System Settings → Privacy & Security**, scroll to Security, choose **Open Anyway**, and confirm. Apple documents this override in [Safely open apps on your Mac](https://support.apple.com/102445). Only override Gatekeeper when you trust the downloaded release; the accompanying `.sha256` file can be checked with `shasum -a 256 -c PackMan-macOS.zip.sha256`.
 
@@ -49,7 +49,9 @@ Updates can be ignored for one version or for a package entirely from the table'
 
 ### Windows
 
-Grab the latest `PackMan-Windows-x64.zip` from the [Releases](https://github.com/dklasens/PackMan/releases) page. Extract it, then run `PackMan.exe`. Requires the .NET 10 Desktop Runtime; if it is missing, Windows offers to download it on first launch.
+Grab the latest `PackMan-Windows-x64.zip` (or the standalone `PackMan-Windows-x64.exe`) from the [Releases](https://github.com/dklasens/PackMan/releases) page. Extract the zip, then run `PackMan.exe`. Requires the .NET 10 Desktop Runtime; if it is missing, Windows offers to download it on first launch.
+
+> PackMan checks GitHub once a day for a newer release and shows a banner when one is available. **Install and Restart** downloads the release zip, verifies it against the published SHA-256 checksum, then replaces the app and restarts it; administrator approval is only requested when PackMan lives in a protected folder such as Program Files. A version can be skipped from the banner, and **Help → Check for Updates** checks immediately.
 
 > Requires Windows 10/11 (x64). PackMan scans as the current user and requests administrator approval only when an update needs it: Chocolatey upgrades always run elevated, and updates that fail with an administrator-style error are retried once with elevation automatically (one UAC prompt per batch). You can also retry any update manually as administrator from the context menu. Updates you hide with **Ignore** can be managed in the Sources window.
 >
@@ -70,7 +72,7 @@ xcodebuild test -project PackMan.xcodeproj -scheme PackMan -destination 'platfor
 ./make-app.sh              # creates the app, release zip, and SHA-256 checksum
 ```
 
-`make-app.sh` builds a universal Release app, applies an ad-hoc signature, verifies the bundle, and writes `dist/PackMan.app`, `dist/PackMan-macOS.zip`, and `dist/PackMan-macOS.zip.sha256`. Override release metadata with `PACKMAN_VERSION=1.2.3` and `PACKMAN_BUILD_NUMBER=123`.
+`make-app.sh` builds a universal Release app, applies an ad-hoc signature, verifies the bundle, and writes `dist/PackMan.app`, `dist/PackMan-macOS.zip`, `dist/PackMan-macOS.dmg`, and a `.sha256` checksum for each archive. Override release metadata with `PACKMAN_VERSION=1.2.3` and `PACKMAN_BUILD_NUMBER=123`.
 
 Pushing a tag such as `v1.2.3` runs both test suites (macOS and Windows), then publishes the packaged macOS and Windows files to a GitHub Release. The workflow needs only the repository-provided `GITHUB_TOKEN`; it does not require signing certificates, Apple credentials, or repository secrets.
 
