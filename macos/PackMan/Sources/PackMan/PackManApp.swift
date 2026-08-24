@@ -15,6 +15,12 @@ struct PackManApp: App {
         }
         .defaultSize(width: 1_020, height: 680)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    viewModel.checkForUpdates()
+                }
+            }
+
             CommandGroup(replacing: .appSettings) {
                 Button("Sources…") {
                     viewModel.isSourcesSheetPresented = true

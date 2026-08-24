@@ -15,7 +15,9 @@
 		1B9499DB4DB2A040B4D02BD4 /* AppViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 436C35B17C4AAA14340CDEFC /* AppViewModelTests.swift */; };
 		1BE144D334BFB29A18F97F10 /* pipx-outdated.json in Resources */ = {isa = PBXBuildFile; fileRef = 145BEB10AFAA37D76D6A1520 /* pipx-outdated.json */; };
 		200627A628E7BACD4C8079C7 /* ProcessRunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC1D372843D08125F8A9FAC2 /* ProcessRunnerTests.swift */; };
+		2ABF6C9A4A441009BEEDC290 /* AppUpdateService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E98DE575100DC9CB93F24D4D /* AppUpdateService.swift */; };
 		31DE4F763616EC5A6A5CBB61 /* BrewSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F883385FF31D4F8979E97A5 /* BrewSource.swift */; };
+		514209971C3B7813BE31D7BA /* AppUpdate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F79ECEE20C41350F0E24556 /* AppUpdate.swift */; };
 		593F5C2E5A254ECCBEC873F9 /* SourceSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0E01C1A36E5CF6013E67354 /* SourceSupport.swift */; };
 		5A6276D73C77CA701EE195B5 /* PackManUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F8FA0281571EF0B417CCBCA /* PackManUITests.swift */; };
 		5C84717E0CB538F4F9C77F5E /* PipSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF77282419674E115B99BD9D /* PipSource.swift */; };
@@ -28,6 +30,7 @@
 		816D00D925A49D7F8BD6A38A /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E38272B0A6B4EF33E8A475C /* AppState.swift */; };
 		84566E824C5BCF7D25BD0938 /* ProcessRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AA5768898BA4187D6C56F23 /* ProcessRunner.swift */; };
 		8EDC1D7A65CC4F9BAFD31FDE /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = 4029AA384EFF78334BA5E96B /* AppIcon.icns */; };
+		9C45A9B5A26CED93A8AA0C7D /* AppUpdateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D36798CE133147BC5217FC0E /* AppUpdateTests.swift */; };
 		9CAB6B5A206E0611049CB56D /* PackageSort.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A76839A48148FE11B911A94 /* PackageSort.swift */; };
 		A6EEE53C6EE4DEE92D0BCEE0 /* PackManApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4D42D0D0204DD61B569563F /* PackManApp.swift */; };
 		A8EF7C52E1451214887E163C /* UpdateStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D59A3C0253E4A119740CBEB /* UpdateStatus.swift */; };
@@ -81,6 +84,7 @@
 		84EE1F5910AF1609DD10DBCF /* pip-outdated.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "pip-outdated.json"; sourceTree = "<group>"; };
 		87937FAE494896712A8A2537 /* Settings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Settings.swift; sourceTree = "<group>"; };
 		8D59A3C0253E4A119740CBEB /* UpdateStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateStatus.swift; sourceTree = "<group>"; };
+		8F79ECEE20C41350F0E24556 /* AppUpdate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdate.swift; sourceTree = "<group>"; };
 		8F883385FF31D4F8979E97A5 /* BrewSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrewSource.swift; sourceTree = "<group>"; };
 		8FD3B1AA8DD9B44674A720AF /* AppEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppEnvironment.swift; sourceTree = "<group>"; };
 		91BD771FEE867387E098A67C /* PackManUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PackManUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -90,8 +94,10 @@
 		BC1D372843D08125F8A9FAC2 /* ProcessRunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessRunnerTests.swift; sourceTree = "<group>"; };
 		BF77282419674E115B99BD9D /* PipSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PipSource.swift; sourceTree = "<group>"; };
 		CF6EDEF9817D423ACB870288 /* TestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestSupport.swift; sourceTree = "<group>"; };
+		D36798CE133147BC5217FC0E /* AppUpdateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdateTests.swift; sourceTree = "<group>"; };
 		E22CF33338FE25C32EB5465C /* PackageSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PackageSource.swift; sourceTree = "<group>"; };
 		E74120D2BBA4B474321DD278 /* NpmSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NpmSource.swift; sourceTree = "<group>"; };
+		E98DE575100DC9CB93F24D4D /* AppUpdateService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdateService.swift; sourceTree = "<group>"; };
 		F0E01C1A36E5CF6013E67354 /* SourceSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceSupport.swift; sourceTree = "<group>"; };
 		FB19258753F391F94760AA51 /* AppViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModel.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -130,6 +136,7 @@
 			isa = PBXGroup;
 			children = (
 				F6E6AC4DEBD0C0B5BAD2427F /* Fixtures */,
+				D36798CE133147BC5217FC0E /* AppUpdateTests.swift */,
 				436C35B17C4AAA14340CDEFC /* AppViewModelTests.swift */,
 				BC1D372843D08125F8A9FAC2 /* ProcessRunnerTests.swift */,
 				3CA688B1286EB0151B137932 /* SettingsAndResolverTests.swift */,
@@ -231,6 +238,8 @@
 			isa = PBXGroup;
 			children = (
 				8FD3B1AA8DD9B44674A720AF /* AppEnvironment.swift */,
+				8F79ECEE20C41350F0E24556 /* AppUpdate.swift */,
+				E98DE575100DC9CB93F24D4D /* AppUpdateService.swift */,
 				7D7E9CADF457AC61B9299030 /* PackageIdValidator.swift */,
 				0AA5768898BA4187D6C56F23 /* ProcessRunner.swift */,
 				87937FAE494896712A8A2537 /* Settings.swift */,
@@ -388,6 +397,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				9C45A9B5A26CED93A8AA0C7D /* AppUpdateTests.swift in Sources */,
 				1B9499DB4DB2A040B4D02BD4 /* AppViewModelTests.swift in Sources */,
 				200627A628E7BACD4C8079C7 /* ProcessRunnerTests.swift in Sources */,
 				D2442D65D1A8C686AFEB438E /* SettingsAndResolverTests.swift in Sources */,
@@ -403,6 +413,8 @@
 			files = (
 				669CC4FA6EBB4A7A123054DC /* AppEnvironment.swift in Sources */,
 				816D00D925A49D7F8BD6A38A /* AppState.swift in Sources */,
+				514209971C3B7813BE31D7BA /* AppUpdate.swift in Sources */,
+				2ABF6C9A4A441009BEEDC290 /* AppUpdateService.swift in Sources */,
 				0A8D58E97E825468F3CC5B14 /* AppViewModel.swift in Sources */,
 				31DE4F763616EC5A6A5CBB61 /* BrewSource.swift in Sources */,
 				0BF4CD16D76A1804503FE46C /* ContentView.swift in Sources */,

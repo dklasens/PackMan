@@ -6,7 +6,7 @@ enum AppEnvironment {
         #if DEBUG
         guard let scenario = uiTestScenario else { return AppViewModel() }
         let source = UITestPackageSource(scenario: scenario)
-        return AppViewModel(sources: [source], settings: UITestSettings())
+        return AppViewModel(sources: [source], settings: UITestSettings(), updater: NoOpAppUpdateService())
         #else
         return AppViewModel()
         #endif
@@ -122,4 +122,15 @@ private final class UITestSettings: SettingsStoring, @unchecked Sendable {
     func setCachedContext(_ context: ToolContext?, for sourceID: SourceID) throws {}
     func ignoredUpdateKeys() -> Set<String> { [] }
     func setUpdateIgnored(_ key: String, ignored: Bool) throws {}
+    func lastAppUpdateCheck() -> Date? { nil }
+    func setLastAppUpdateCheck(_ date: Date?) throws {}
+    func skippedAppUpdateVersion() -> String? { nil }
+    func setSkippedAppUpdateVersion(_ version: String?) throws {}
+    func availableAppUpdate() -> AppUpdateInfo? { nil }
+    func setAvailableAppUpdate(_ update: AppUpdateInfo?) throws {}
+}
+
+private struct NoOpAppUpdateService: AppUpdateChecking {
+    func check(force: Bool) async throws -> AppUpdateInfo? { nil }
+    func apply(_ update: AppUpdateInfo, progress: (@Sendable (String) -> Void)?) async throws {}
 }

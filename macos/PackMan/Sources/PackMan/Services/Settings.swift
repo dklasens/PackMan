@@ -11,6 +11,12 @@ protocol SettingsStoring: Sendable {
     func setCachedContext(_ context: ToolContext?, for sourceID: SourceID) throws
     func ignoredUpdateKeys() -> Set<String>
     func setUpdateIgnored(_ key: String, ignored: Bool) throws
+    func lastAppUpdateCheck() -> Date?
+    func setLastAppUpdateCheck(_ date: Date?) throws
+    func skippedAppUpdateVersion() -> String?
+    func setSkippedAppUpdateVersion(_ version: String?) throws
+    func availableAppUpdate() -> AppUpdateInfo?
+    func setAvailableAppUpdate(_ update: AppUpdateInfo?) throws
 }
 
 final class SettingsStore: SettingsStoring, @unchecked Sendable {
@@ -22,6 +28,35 @@ final class SettingsStore: SettingsStoring, @unchecked Sendable {
         var executableOverrides: [String: String]
         var cachedContexts: [String: CachedToolContext]?
         var ignoredUpdates: [String]?
+        var lastAppUpdateCheck: Date?
+        var skippedAppUpdateVersion: String?
+        var availableAppUpdate: StoredAppUpdate?
+    }
+
+    private struct StoredAppUpdate: Codable {
+        var version: String
+        var downloadUrl: String
+        var checksumUrl: String
+        var releaseUrl: String
+
+        init(_ info: AppUpdateInfo) {
+            version = info.version
+            downloadUrl = info.downloadURL.absoluteString
+            checksumUrl = info.checksumURL.absoluteString
+            releaseUrl = info.releaseURL.absoluteString
+        }
+
+        var info: AppUpdateInfo? {
+            guard let downloadURL = URL(string: downloadUrl),
+                  let checksumURL = URL(string: checksumUrl),
+                  let releaseURL = URL(string: releaseUrl),
+                  !version.trimmed.isEmpty else { return nil }
+            return AppUpdateInfo(
+                version: version,
+                downloadURL: downloadURL,
+                checksumURL: checksumURL,
+                releaseURL: releaseURL)
+        }
     }
 
     private struct CachedToolContext: Codable {
@@ -58,7 +93,7 @@ final class SettingsStore: SettingsStoring, @unchecked Sendable {
     init(settingsURL: URL? = nil) {
         self.settingsURL = settingsURL ?? Self.defaultURL
         data = SettingsData(
-            version: 3,
+            version: 4,
             disabledSources: [],
             executableOverrides: [:],
             cachedContexts: [:],
@@ -133,14 +168,48 @@ final class SettingsStore: SettingsStoring, @unchecked Sendable {
         }
     }
 
+    func lastAppUpdateCheck() -> Date? {
+        lock.withLock { data.lastAppUpdateCheck }
+    }
+
+    func setLastAppUpdateCheck(_ date: Date?) throws {
+        try lock.withLock {
+            data.lastAppUpdateCheck = date
+            try saveLocked()
+        }
+    }
+
+    func skippedAppUpdateVersion() -> String? {
+        lock.withLock { data.skippedAppUpdateVersion }
+    }
+
+    func setSkippedAppUpdateVersion(_ version: String?) throws {
+        try lock.withLock {
+            data.skippedAppUpdateVersion = version?.trimmed.isEmpty == false ? version : nil
+            try saveLocked()
+        }
+    }
+
+    func availableAppUpdate() -> AppUpdateInfo? {
+        lock.withLock { data.availableAppUpdate?.info }
+    }
+
+    func setAvailableAppUpdate(_ update: AppUpdateInfo?) throws {
+        try lock.withLock {
+            data.availableAppUpdate = update.map(StoredAppUpdate.init)
+            try saveLocked()
+        }
+    }
+
     private func loadFromDisk() {
         guard FileManager.default.fileExists(atPath: settingsURL.path) else { return }
         Self.restrictPermissions(at: settingsURL)
         do {
             let raw = try Data(contentsOf: settingsURL)
             let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
             if var current = try? decoder.decode(SettingsData.self, from: raw), current.version >= 2 {
-                current.version = 3
+                current.version = 4
                 current.cachedContexts = current.cachedContexts ?? [:]
                 current.ignoredUpdates = current.ignoredUpdates ?? []
                 data = current
@@ -161,6 +230,7 @@ final class SettingsStore: SettingsStoring, @unchecked Sendable {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
         try encoder.encode(data).write(to: settingsURL, options: .atomic)
         Self.restrictPermissions(at: settingsURL)
         loadIssue = nil

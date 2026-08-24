@@ -71,6 +71,28 @@ final class SettingsAndResolverTests: XCTestCase {
         XCTAssertNil(reloaded.cachedContext(for: .dotnet), "Missing executables must invalidate cached probes")
     }
 
+    func testAppUpdateSettingsRoundTrip() throws {
+        let root = try temporaryDirectory()
+        let url = root.appendingPathComponent("settings.json")
+        let update = AppUpdateInfo(
+            version: "99.0.0",
+            downloadURL: URL(string: "https://github.com/dklasens/PackMan/releases/download/v99.0.0/PackMan-macOS.zip")!,
+            checksumURL: URL(string: "https://github.com/dklasens/PackMan/releases/download/v99.0.0/PackMan-macOS.zip.sha256")!,
+            releaseURL: URL(string: "https://github.com/dklasens/PackMan/releases/tag/v99.0.0")!)
+        let checkedAt = Date(timeIntervalSince1970: 1_700_000_000)
+
+        var settings: SettingsStore? = SettingsStore(settingsURL: url)
+        try settings?.setLastAppUpdateCheck(checkedAt)
+        try settings?.setSkippedAppUpdateVersion("1.8.0")
+        try settings?.setAvailableAppUpdate(update)
+        settings = nil
+
+        let reloaded = SettingsStore(settingsURL: url)
+        XCTAssertEqual(reloaded.lastAppUpdateCheck()?.timeIntervalSince1970, checkedAt.timeIntervalSince1970)
+        XCTAssertEqual(reloaded.skippedAppUpdateVersion(), "1.8.0")
+        XCTAssertEqual(reloaded.availableAppUpdate(), update)
+    }
+
     func testResolverUsesInheritedPath() async throws {
         let root = try temporaryDirectory()
         let bin = root.appendingPathComponent("bin", isDirectory: true)

@@ -49,6 +49,8 @@ The app is ad-hoc signed and cannot be notarized because this project does not u
 
 Updates can be ignored for one version or for a package entirely from the table's context menu, then restored from **Sources → Ignored Updates**.
 
+> PackMan checks GitHub once a day for a newer release and shows a banner when one is available. **Install and Restart** downloads `PackMan-macOS.zip`, verifies it against the published SHA-256 checksum, replaces the app, and relaunches it. **Skip** hides that version; **PackMan → Check for Updates…** checks immediately. The first time you open a browser-downloaded zip or disk image you may still need **Open Anyway**.
+
 ### Windows
 
 Grab the latest `PackMan-Windows-x64.zip` (or the standalone `PackMan-Windows-x64.exe`) from the [Releases](https://github.com/dklasens/PackMan/releases) page. Extract the zip, then run `PackMan.exe`. Requires the .NET 10 Desktop Runtime; if it is missing, Windows offers to download it on first launch.
@@ -76,7 +78,7 @@ xcodebuild test -project PackMan.xcodeproj -scheme PackMan -destination 'platfor
 
 `make-app.sh` builds a universal Release app, applies an ad-hoc signature, verifies the bundle, and writes `dist/PackMan.app`, `dist/PackMan-macOS.zip`, `dist/PackMan-macOS.dmg`, and a `.sha256` checksum for each archive. Override release metadata with `PACKMAN_VERSION=1.2.3` and `PACKMAN_BUILD_NUMBER=123`.
 
-Pushing a tag such as `v1.2.3` runs both test suites (macOS and Windows), then publishes the packaged macOS and Windows files to a GitHub Release. The workflow needs only the repository-provided `GITHUB_TOKEN`; it does not require signing certificates, Apple credentials, or repository secrets.
+Pushing a tag such as `v1.2.3` runs both test suites (macOS and Windows), then publishes the packaged macOS and Windows files to a GitHub Release. The **PackMan Release** workflow can also be run manually (`workflow_dispatch`) to rebuild one or both platforms and attach the artifacts to an existing tag without retagging. The workflow needs only the repository-provided `GITHUB_TOKEN`; it does not require signing certificates, Apple credentials, or repository secrets.
 
 ### Windows
 
@@ -94,7 +96,7 @@ The published single-file exe lands in `windows/src/PackMan/bin/Publish/`. The W
 
 ## Security model
 
-- On macOS, PackMan scans and updates as the current user and never elevates privileges itself. App Store updates are handed to you as a one-line `sudo mas update --force <id>` Terminal command (or the App Store app), because macOS ties App Store commerce to your logged-in session and cannot service it from a background or elevated process.
+- On macOS, PackMan scans and updates as the current user and never elevates privileges itself. App Store updates are handed to you as a one-line `sudo mas update --force <id>` Terminal command (or the App Store app), because macOS ties App Store commerce to your logged-in session and cannot service it from a background or elevated process. Self-updates download `PackMan-macOS.zip` from GitHub, verify the published SHA-256 checksum, then replace the running app from a staging folder under `$TMPDIR/PackMan` after you confirm **Install and Restart**.
 - On Windows, PackMan scans as the current user and never elevates silently: administrator approval is requested through UAC only when an update or installer needs it, and only after you confirm or the update fails in a way that requires it. The self-updater asks for approval only when the install folder is protected.
 - Windows self-updates download the release archive from GitHub and verify it against the published SHA-256 checksum before anything is replaced. The replacement runs in a short-lived helper that only overwrites PackMan's own executable from a staging folder under `%TEMP%\PackMan`, then relaunches the app.
 - Settings are stored in `~/Library/Application Support/PackMan/settings.json` (macOS) or `%APPDATA%\PackMan\settings.json` (Windows), kept private to your user. They can contain custom executable locations, so other local accounts must not be able to modify them.
@@ -102,5 +104,5 @@ The published single-file exe lands in `windows/src/PackMan/bin/Publish/`. The W
 
 ## Tech
 
-- **macOS**: SwiftUI, Swift concurrency, SwiftPM. Scans run concurrently with per-source progress, cancellation, and partial-result handling; updates are verified afterwards. `brew outdated --json=v2`, npm/pip/pipx JSON output, and the PyPI/nuget.org JSON APIs keep parsing robust.
+- **macOS**: SwiftUI, Swift concurrency, SwiftPM. Scans run concurrently with per-source progress, cancellation, and partial-result handling; updates are verified afterwards. `brew outdated --json=v2`, npm/pip/pipx JSON output, and the PyPI/nuget.org JSON APIs keep parsing robust. The app self-updates from GitHub Releases: the latest release is checked daily, the zip is SHA-256-verified, and a helper script swaps `PackMan.app` after exit.
 - **Windows**: WPF on .NET 10, [WPF UI](https://wpfui.lepo.co/) (Fluent/Mica design), CommunityToolkit.Mvvm. Scans run concurrently with per-source health, cancellation, partial-result handling, and post-update verification. Updates that need administrator rights run through a single-session elevated helper with a verified client identity. The app self-updates from GitHub Releases: the latest release is checked daily, the download is SHA-256-verified, and a helper process swaps the executable after exit.

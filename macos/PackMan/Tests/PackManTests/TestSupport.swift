@@ -76,6 +76,9 @@ final class MemorySettings: SettingsStoring, @unchecked Sendable {
     private var overrides: [ToolID: String]
     private var cachedContexts: [SourceID: ToolContext]
     private var ignored: Set<String>
+    var lastAppUpdateCheckAt: Date?
+    var skippedAppVersion: String?
+    var storedAvailableAppUpdate: AppUpdateInfo?
     let loadIssue: String?
 
     init(
@@ -130,6 +133,36 @@ final class MemorySettings: SettingsStoring, @unchecked Sendable {
     func setUpdateIgnored(_ key: String, ignored: Bool) throws {
         lock.lock(); defer { lock.unlock() }
         if ignored { self.ignored.insert(key) } else { self.ignored.remove(key) }
+    }
+
+    func lastAppUpdateCheck() -> Date? {
+        lock.lock(); defer { lock.unlock() }
+        return lastAppUpdateCheckAt
+    }
+
+    func setLastAppUpdateCheck(_ date: Date?) throws {
+        lock.lock(); defer { lock.unlock() }
+        lastAppUpdateCheckAt = date
+    }
+
+    func skippedAppUpdateVersion() -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return skippedAppVersion
+    }
+
+    func setSkippedAppUpdateVersion(_ version: String?) throws {
+        lock.lock(); defer { lock.unlock() }
+        skippedAppVersion = version
+    }
+
+    func availableAppUpdate() -> AppUpdateInfo? {
+        lock.lock(); defer { lock.unlock() }
+        return storedAvailableAppUpdate
+    }
+
+    func setAvailableAppUpdate(_ update: AppUpdateInfo?) throws {
+        lock.lock(); defer { lock.unlock() }
+        storedAvailableAppUpdate = update
     }
 }
 

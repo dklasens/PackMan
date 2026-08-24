@@ -6,6 +6,10 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if viewModel.showsAppUpdateBanner {
+                AppUpdateBanner(viewModel: viewModel)
+            }
+
             if viewModel.showsIssueBanner {
                 IssueBanner(viewModel: viewModel)
             }
@@ -40,6 +44,9 @@ struct ContentView: View {
         }
         .onChange(of: viewModel.sortOrder) { _, _ in
             viewModel.applySort()
+        }
+        .onAppear {
+            viewModel.beginStartupUpdateCheck()
         }
     }
 
@@ -585,6 +592,33 @@ private struct EmptyStateView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(viewModel.isBusy)
         }
+    }
+}
+
+private struct AppUpdateBanner: View {
+    @Bindable var viewModel: AppViewModel
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "arrow.down.app.fill")
+                .foregroundStyle(.blue)
+            Text(viewModel.appUpdateText)
+                .lineLimit(2)
+            Spacer()
+            Button("Install and Restart") { viewModel.installAvailableUpdate() }
+                .disabled(!viewModel.canInstallAppUpdate)
+                .accessibilityIdentifier("installUpdateButton")
+            Button("Later") { viewModel.dismissAvailableUpdate() }
+                .disabled(viewModel.isBusy)
+            Button("Skip") { viewModel.skipAvailableUpdate() }
+                .disabled(viewModel.isBusy)
+                .accessibilityIdentifier("skipUpdateButton")
+        }
+        .font(.callout)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(.blue.opacity(0.12))
+        .accessibilityIdentifier("appUpdateBanner")
     }
 }
 

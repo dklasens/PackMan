@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 
@@ -65,13 +66,18 @@ final class AppViewModel {
     ]
     var searchText = ""
     var isLogVisible = false
+    var availableUpdate: AppUpdateInfo?
+    var confirmAppUpdate: (String) -> Bool = AppViewModel.confirmInstallAlert
+    var terminateAfterStagingUpdate: () -> Void = { NSApplication.shared.terminate(nil) }
 
     let sourceOptions: [SourceOption]
 
     @ObservationIgnored private let settings: any SettingsStoring
+    @ObservationIgnored private let updater: (any AppUpdateChecking)?
     @ObservationIgnored private var activeTask: Task<Void, Never>?
     @ObservationIgnored private var nextLogID = 0
     @ObservationIgnored private var lastOutputByCommandAndStream: [String: String] = [:]
+    @ObservationIgnored private var isCheckingForUpdates = false
     @ObservationIgnored internal private(set) var startedOperations = 0
     @ObservationIgnored internal private(set) var completedOperations = 0
 
@@ -79,9 +85,11 @@ final class AppViewModel {
 
     init(
         sources: [any PackageSource]? = nil,
-        settings: any SettingsStoring = SettingsStore.shared
+        settings: any SettingsStoring = SettingsStore.shared,
+        updater: (any AppUpdateChecking)? = nil
     ) {
         self.settings = settings
+        self.updater = updater ?? AppUpdateService(settings: settings)
         let configuredSources = sources ?? [
             BrewSource(kind: .formula),
             BrewSource(kind: .cask),
@@ -123,6 +131,12 @@ final class AppViewModel {
     var issueSources: [SourceOption] { sourceOptions.filter { $0.isEnabled && $0.scanState.hasIssue } }
     var hasIgnoredUpdates: Bool { !ignoredUpdates.isEmpty }
     var isSourcesSheetPresented = false
+    var showsAppUpdateBanner: Bool { availableUpdate != nil }
+    var canInstallAppUpdate: Bool { !isBusy && availableUpdate != nil }
+    var appUpdateText: String {
+        guard let availableUpdate else { return "" }
+        return "PackMan \(availableUpdate.version) is available (you have \(Self.appVersion))."
+    }
 
     var showsIssueBanner: Bool {
         switch scanSummary {
@@ -155,6 +169,8 @@ final class AppViewModel {
         case .updating(let current, let completed, let total):
             if let current { return "Updating \(current) (\(completed + 1) of \(total))…" }
             return "Preparing updates…"
+        case .updatingApp(let version):
+            return "Installing PackMan \(version)…"
         case .clearingCache(let current, let completed, let total):
             if let current { return "Clearing cache for \(current) (\(completed + 1) of \(total))…" }
             return "Clearing caches…"
@@ -246,6 +262,41 @@ final class AppViewModel {
             await self?.runClearCaches(options: [option])
         }
         startedOperations += 1
+    }
+
+    func beginStartupUpdateCheck() {
+        Task { await checkForAppUpdates(force: false) }
+    }
+
+    func checkForUpdates() {
+        Task { await checkForAppUpdates(force: true) }
+    }
+
+    func installAvailableUpdate() {
+        guard let update = availableUpdate, updater != nil, !isBusy else { return }
+        let message = "Download and install PackMan \(update.version)?\n\n"
+            + "PackMan closes while the update is applied and restarts automatically."
+        guard confirmAppUpdate(message) else { return }
+        activeTask = Task { [weak self] in
+            await self?.runAppUpdate(update)
+        }
+        startedOperations += 1
+    }
+
+    func skipAvailableUpdate() {
+        guard let update = availableUpdate else { return }
+        do {
+            try settings.setSkippedAppUpdateVersion(update.version)
+            try settings.setAvailableAppUpdate(nil)
+            appendLog("PackMan \(update.version) will not be offered again.")
+            availableUpdate = nil
+        } catch {
+            appendLog("Could not save the skipped version: \(error.userMessage)", level: .error)
+        }
+    }
+
+    func dismissAvailableUpdate() {
+        availableUpdate = nil
     }
 
     private func runClearCaches(options: [SourceOption]) async {
@@ -855,11 +906,66 @@ final class AppViewModel {
         return versionOnly ? "\(packageKey)@\(package.availableVersion)" : packageKey
     }
 
-    static var appVersion: String {
+    nonisolated static var appVersion: String {
         if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String, !version.isEmpty {
             return version
         }
-        return "1.7.2"
+        return "1.8.0"
+    }
+
+    private func checkForAppUpdates(force: Bool) async {
+        guard let updater, !isCheckingForUpdates else { return }
+        isCheckingForUpdates = true
+        defer { isCheckingForUpdates = false }
+        do {
+            if let update = try await updater.check(force: force) {
+                availableUpdate = update
+                appendLog("PackMan \(update.version) is available; use the banner to install it.", level: .success)
+            } else if force {
+                appendLog("PackMan is up to date.")
+            }
+        } catch {
+            if force {
+                appendLog("Update check failed — \(error.userMessage)", level: .warning)
+            }
+        }
+    }
+
+    private func runAppUpdate(_ update: AppUpdateInfo) async {
+        guard let updater else {
+            operation = .idle
+            activeTask = nil
+            completedOperations += 1
+            return
+        }
+        isLogVisible = true
+        operation = .updatingApp(version: update.version)
+        appendLog("Updating PackMan to \(update.version).")
+        do {
+            try await updater.apply(update) { [weak self] message in
+                Task { @MainActor in
+                    self?.appendLog(message)
+                }
+            }
+            appendLog("PackMan \(update.version) is staged; restarting…", level: .success)
+            terminateAfterStagingUpdate()
+        } catch is CancellationError {
+            appendLog("The PackMan update was cancelled.", level: .warning)
+        } catch {
+            appendLog("The PackMan update failed — \(error.userMessage)", level: .error)
+        }
+        operation = .idle
+        activeTask = nil
+        completedOperations += 1
+    }
+
+    private static func confirmInstallAlert(_ message: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Install PackMan Update"
+        alert.informativeText = message
+        alert.addButton(withTitle: "Install and Restart")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     static func displayName(forIgnoreKey key: String) -> String {

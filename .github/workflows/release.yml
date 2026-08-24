@@ -5,12 +5,30 @@ on:
     tags:
       - "v[0-9]+.[0-9]+"
       - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to attach assets to
+        required: true
+        default: v1.8.0
+      platform:
+        description: Platforms to build and publish
+        type: choice
+        options:
+          - macos
+          - windows
+          - both
+        default: macos
 
 permissions:
   contents: write
 
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+
 jobs:
   macos:
+    if: github.event_name == 'push' || inputs.platform == 'macos' || inputs.platform == 'both'
     runs-on: macos-15
     timeout-minutes: 25
     defaults:
@@ -29,7 +47,7 @@ jobs:
       - name: Build ad-hoc signed app
         env:
           PACKMAN_BUILD_NUMBER: ${{ github.run_number }}
-        run: PACKMAN_VERSION="${GITHUB_REF_NAME#v}" ./make-app.sh
+        run: PACKMAN_VERSION="${RELEASE_TAG#v}" ./make-app.sh
       - uses: actions/upload-artifact@v4
         with:
           name: macos-release
@@ -40,6 +58,7 @@ jobs:
             macos/PackMan/dist/PackMan-macOS.dmg.sha256
 
   windows:
+    if: github.event_name == 'push' || inputs.platform == 'windows' || inputs.platform == 'both'
     runs-on: windows-2025
     timeout-minutes: 25
     defaults:
@@ -56,7 +75,7 @@ jobs:
       - name: Publish Windows executable
         shell: pwsh
         run: |
-          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $version = $env:RELEASE_TAG.TrimStart('v')
           dotnet publish src/PackMan/PackMan.csproj --configuration Release --no-build --no-restore --output dist/windows /p:Version=$version
       - name: Test published Windows executable
         env:
@@ -82,6 +101,11 @@ jobs:
 
   publish:
     needs: [macos, windows]
+    if: >-
+      always()
+      && (needs.macos.result == 'success' || needs.windows.result == 'success')
+      && needs.macos.result != 'failure'
+      && needs.windows.result != 'failure'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -93,9 +117,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          tag="$RELEASE_TAG"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
           else
-            gh release create "$GITHUB_REF_NAME" dist/* \
-              --verify-tag --generate-notes --title "PackMan ${GITHUB_REF_NAME#v}"
+            gh release create "$tag" dist/* \
+              --verify-tag --generate-notes --title "PackMan ${tag#v}"
           fi

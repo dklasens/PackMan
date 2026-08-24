@@ -323,6 +323,131 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(viewModel.filteredPackages.isEmpty)
     }
 
+    func testStartupUpdateCheckShowsBanner() async throws {
+        let update = AppUpdateInfo(
+            version: "99.0.0",
+            downloadURL: URL(string: "https://github.com/dklasens/PackMan/releases/download/v99.0.0/PackMan-macOS.zip")!,
+            checksumURL: URL(string: "https://github.com/dklasens/PackMan/releases/download/v99.0.0/PackMan-macOS.zip.sha256")!,
+            releaseURL: URL(string: "https://github.com/dklasens/PackMan/releases/tag/v99.0.0")!)
+        let updater = StubAppUpdateService(update)
+        let viewModel = AppViewModel(sources: [availableSource(id: .npm, name: "npm", report: SourceScanReport())],
+                                     settings: MemorySettings(), updater: updater)
+        viewModel.beginStartupUpdateCheck()
+        try await waitUntil { viewModel.availableUpdate != nil }
+
+        XCTAssertTrue(viewModel.showsAppUpdateBanner)
+        XCTAssertTrue(viewModel.appUpdateText.contains("99.0.0"))
+        XCTAssertEqual(updater.checks, [false])
+    }
+
+    func testManualCheckReportsUpToDateWhenNoUpdate() async throws {
+        let updater = StubAppUpdateService(nil)
+        let viewModel = AppViewModel(sources: [availableSource(id: .npm, name: "npm", report: SourceScanReport())],
+                                     settings: MemorySettings(), updater: updater)
+        viewModel.checkForUpdates()
+        try await waitUntil {
+            viewModel.logEntries.contains { $0.message.localizedCaseInsensitiveContains("up to date") }
+        }
+        XCTAssertEqual(updater.checks, [true])
+        XCTAssertFalse(viewModel.showsAppUpdateBanner)
+    }
+
+    func testInstallUpdateAppliesAndTerminates() async throws {
+        let update = AppUpdateInfo(
+            version: "99.0.0",
+            downloadURL: URL(string: "https://github.com/dklasens/PackMan/releases/download/v99.0.0/PackMan-macOS.zip")!,
+            checksumURL: URL(string: "https://github.com/dklasens/PackMan/releases/download/v99.0.0/PackMan-macOS.zip.sha256")!,
+            releaseURL: URL(string: "https://github.com/dklasens/PackMan/releases/tag/v99.0.0")!)
+        let updater = StubAppUpdateService(update)
+        var terminations = 0
+        let viewModel = AppViewModel(sources: [availableSource(id: .npm, name: "npm", report: SourceScanReport())],
+                                     settings: MemorySettings(), updater: updater)
+        viewModel.confirmAppUpdate = { _ in true }
+        viewModel.terminateAfterStagingUpdate = { terminations += 1 }
+        viewModel.beginStartupUpdateCheck()
+        try await waitUntil { viewModel.availableUpdate != nil }
+
+        viewModel.installAvailableUpdate()
+        try await waitUntilIdle(viewModel)
+
+        XCTAssertEqual(updater.applied.map(\.version), ["99.0.0"])
+        XCTAssertEqual(terminations, 1)
+        XCTAssertTrue(viewModel.logEntries.contains { $0.level == .success && $0.message.contains("staged") })
+    }
+
+    func testInstallUpdateDeclinedDoesNotApply() async throws {
+        let update = AppUpdateInfo(
+            version: "99.0.0",
+            downloadURL: URL(string: "https://github.com/dklasens/PackMan/releases/download/v99.0.0/PackMan-macOS.zip")!,
+            checksumURL: URL(string: "https://github.com/dklasens/PackMan/releases/download/v99.0.0/PackMan-macOS.zip.sha256")!,
+            releaseURL: URL(string: "https://github.com/dklasens/PackMan/releases/tag/v99.0.0")!)
+        let updater = StubAppUpdateService(update)
+        let viewModel = AppViewModel(sources: [availableSource(id: .npm, name: "npm", report: SourceScanReport())],
+                                     settings: MemorySettings(), updater: updater)
+        viewModel.confirmAppUpdate = { _ in false }
+        viewModel.beginStartupUpdateCheck()
+        try await waitUntil { viewModel.availableUpdate != nil }
+
+        viewModel.installAvailableUpdate()
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertTrue(updater.applied.isEmpty)
+        XCTAssertTrue(viewModel.showsAppUpdateBanner)
+    }
+
+    func testFailedAppUpdateIsReportedWithoutTerminate() async throws {
+        let update = AppUpdateInfo(
+            version: "99.0.0",
+            downloadURL: URL(string: "https://github.com/dklasens/PackMan/releases/download/v99.0.0/PackMan-macOS.zip")!,
+            checksumURL: URL(string: "https://github.com/dklasens/PackMan/releases/download/v99.0.0/PackMan-macOS.zip.sha256")!,
+            releaseURL: URL(string: "https://github.com/dklasens/PackMan/releases/tag/v99.0.0")!)
+        let updater = StubAppUpdateService(update, applyError: AppUpdateError.checksumMismatch)
+        var terminations = 0
+        let viewModel = AppViewModel(sources: [availableSource(id: .npm, name: "npm", report: SourceScanReport())],
+                                     settings: MemorySettings(), updater: updater)
+        viewModel.confirmAppUpdate = { _ in true }
+        viewModel.terminateAfterStagingUpdate = { terminations += 1 }
+        viewModel.beginStartupUpdateCheck()
+        try await waitUntil { viewModel.availableUpdate != nil }
+
+        viewModel.installAvailableUpdate()
+        try await waitUntilIdle(viewModel)
+
+        XCTAssertEqual(terminations, 0)
+        XCTAssertTrue(viewModel.logEntries.contains {
+            $0.level == .error && $0.message.localizedCaseInsensitiveContains("checksum")
+        })
+        XCTAssertTrue(viewModel.showsAppUpdateBanner)
+    }
+
+    func testSkipUpdatePersistsAndHidesBanner() async throws {
+        let update = AppUpdateInfo(
+            version: "99.0.0",
+            downloadURL: URL(string: "https://github.com/dklasens/PackMan/releases/download/v99.0.0/PackMan-macOS.zip")!,
+            checksumURL: URL(string: "https://github.com/dklasens/PackMan/releases/download/v99.0.0/PackMan-macOS.zip.sha256")!,
+            releaseURL: URL(string: "https://github.com/dklasens/PackMan/releases/tag/v99.0.0")!)
+        let settings = MemorySettings()
+        settings.storedAvailableAppUpdate = update
+        let viewModel = AppViewModel(sources: [availableSource(id: .npm, name: "npm", report: SourceScanReport())],
+                                     settings: settings, updater: StubAppUpdateService(update))
+        viewModel.beginStartupUpdateCheck()
+        try await waitUntil { viewModel.availableUpdate != nil }
+
+        viewModel.skipAvailableUpdate()
+
+        XCTAssertFalse(viewModel.showsAppUpdateBanner)
+        XCTAssertEqual(settings.skippedAppVersion, "99.0.0")
+        XCTAssertNil(settings.storedAvailableAppUpdate)
+    }
+
+    private func waitUntil(_ condition: @escaping () -> Bool, timeout: TimeInterval = 2) async throws {
+        let deadline = Date.now.addingTimeInterval(timeout)
+        while !condition() {
+            if Date.now > deadline { throw WaitError.timedOut }
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+    }
+
     private func availableSource(id: SourceID, name: String, report: SourceScanReport) -> StubSource {
         StubSource(
             id: id,
@@ -346,6 +471,28 @@ final class AppViewModelTests: XCTestCase {
     }
 
     private enum WaitError: Error { case timedOut }
+}
+
+private final class StubAppUpdateService: AppUpdateChecking, @unchecked Sendable {
+    private let update: AppUpdateInfo?
+    private let applyError: Error?
+    private(set) var checks: [Bool] = []
+    private(set) var applied: [AppUpdateInfo] = []
+
+    init(_ update: AppUpdateInfo?, applyError: Error? = nil) {
+        self.update = update
+        self.applyError = applyError
+    }
+
+    func check(force: Bool) async throws -> AppUpdateInfo? {
+        checks.append(force)
+        return update
+    }
+
+    func apply(_ update: AppUpdateInfo, progress: (@Sendable (String) -> Void)?) async throws {
+        if let applyError { throw applyError }
+        applied.append(update)
+    }
 }
 
 private actor SlowVerifier {
