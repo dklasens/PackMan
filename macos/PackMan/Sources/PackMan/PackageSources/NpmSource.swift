@@ -71,7 +71,7 @@ struct NpmSource: PackageSource {
             // npm reports the "latest" dist-tag even when it trails what is installed, which is
             // routine for a package tracking a prerelease channel. Installing that version would
             // be a downgrade, so only offer versions that provably move forward.
-            guard SemanticVersion.isUpgrade(from: current, to: latest) else { continue }
+            guard VersionComparator.isUpgrade(from: current, to: latest) else { continue }
             updates.append(PackageInfo(
                 id: name,
                 name: name,
@@ -198,101 +198,6 @@ struct NpmSource: PackageSource {
 
         let sizeAfter = SourceSupport.directorySize(at: npmCacheURL)
         return max(0, sizeBefore - sizeAfter)
-    }
-}
-
-/// Just enough of semver 2.0.0 to decide whether an offered version really moves a package
-/// forward. npm dist-tags are mutable and a globally installed package can sit on a prerelease
-/// channel that runs ahead of "latest", so npm outdated happily reports a "latest" that is
-/// older than what is installed.
-enum SemanticVersion {
-    /// True when `candidate` is newer than `installed`, or when either side cannot be parsed.
-    /// Unparseable versions stay visible on purpose: an unfamiliar versioning scheme should not
-    /// silently hide an update, and the comparison is only here to suppress moves that are
-    /// provably backwards.
-    static func isUpgrade(from installed: String, to candidate: String) -> Bool {
-        let installed = installed.trimmed
-        let candidate = candidate.trimmed
-        guard !candidate.isEmpty else { return false }
-        guard !installed.isEmpty else { return true }
-        guard installed != candidate else { return false }
-        guard let order = compare(candidate, installed) else { return true }
-        return order == .orderedDescending
-    }
-
-    /// Ascending when `left` sorts before `right`, descending when after, same when equal, and
-    /// nil when either side is not a semver version.
-    static func compare(_ left: String, _ right: String) -> ComparisonResult? {
-        guard let a = parse(left), let b = parse(right) else { return nil }
-        for (first, second) in zip(a.core, b.core) where first != second {
-            return first < second ? .orderedAscending : .orderedDescending
-        }
-        return comparePrerelease(a.prerelease, b.prerelease)
-    }
-
-    private static func parse(_ value: String) -> (core: [Int], prerelease: String)? {
-        var text = value.trimmed
-        if text.hasPrefix("v") || text.hasPrefix("=") { text.removeFirst() }
-
-        // Build metadata never participates in precedence.
-        if let build = text.firstIndex(of: "+") { text = String(text[text.startIndex..<build]) }
-
-        // The version core is digits and dots only, so the first hyphen starts the prerelease.
-        var prerelease = ""
-        if let hyphen = text.firstIndex(of: "-") {
-            prerelease = String(text[text.index(after: hyphen)...])
-            text = String(text[text.startIndex..<hyphen])
-        }
-
-        let parts = text.split(separator: ".", omittingEmptySubsequences: false)
-        guard (1...3).contains(parts.count) else { return nil }
-        var core = [0, 0, 0]
-        for (index, part) in parts.enumerated() {
-            guard part.allSatisfy({ $0.isASCII && $0.isNumber }), let number = Int(part) else { return nil }
-            core[index] = number
-        }
-        return (core, prerelease)
-    }
-
-    private static func comparePrerelease(_ left: String, _ right: String) -> ComparisonResult {
-        // A release outranks any prerelease of the same core version.
-        if left.isEmpty && right.isEmpty { return .orderedSame }
-        if left.isEmpty { return .orderedDescending }
-        if right.isEmpty { return .orderedAscending }
-
-        let leftParts = left.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
-        let rightParts = right.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
-        for index in 0..<max(leftParts.count, rightParts.count) {
-            if index >= leftParts.count { return .orderedAscending }
-            if index >= rightParts.count { return .orderedDescending }
-            let result = compareIdentifier(leftParts[index], rightParts[index])
-            if result != .orderedSame { return result }
-        }
-        return .orderedSame
-    }
-
-    private static func compareIdentifier(_ left: String, _ right: String) -> ComparisonResult {
-        switch (isNumeric(left), isNumeric(right)) {
-        case (true, true):
-            // Compared without parsing so arbitrarily long build counters cannot overflow.
-            let a = String(left.drop(while: { $0 == "0" }))
-            let b = String(right.drop(while: { $0 == "0" }))
-            guard a.count == b.count else { return a.count < b.count ? .orderedAscending : .orderedDescending }
-            return lexical(a, b)
-        // Numeric identifiers always have lower precedence than alphanumeric ones.
-        case (true, false): return .orderedAscending
-        case (false, true): return .orderedDescending
-        case (false, false): return lexical(left, right)
-        }
-    }
-
-    private static func isNumeric(_ value: String) -> Bool {
-        !value.isEmpty && value.allSatisfy { $0.isASCII && $0.isNumber }
-    }
-
-    private static func lexical(_ left: String, _ right: String) -> ComparisonResult {
-        if left == right { return .orderedSame }
-        return left < right ? .orderedAscending : .orderedDescending
     }
 }
 

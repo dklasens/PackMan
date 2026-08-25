@@ -239,18 +239,18 @@ final class SourceParsingTests: XCTestCase {
         XCTAssertTrue(report.issues.isEmpty)
     }
 
-    func testSemanticVersionOnlyReportsProvableUpgrades() {
-        XCTAssertTrue(SemanticVersion.isUpgrade(from: "1.0.0", to: "1.0.1"))
-        XCTAssertFalse(SemanticVersion.isUpgrade(from: "1.0.0", to: "1.0.0"))
-        XCTAssertFalse(SemanticVersion.isUpgrade(from: "2.0.0", to: "1.9.9"))
-        XCTAssertFalse(SemanticVersion.isUpgrade(from: "0.0.0-beta-18155", to: "0.0.0-beta-17823"))
-        XCTAssertTrue(SemanticVersion.isUpgrade(from: "0.0.0-beta-17823", to: "0.0.0-beta-18155"))
-        XCTAssertTrue(SemanticVersion.isUpgrade(from: "1.0.0-rc.1", to: "1.0.0"))
-        XCTAssertFalse(SemanticVersion.isUpgrade(from: "1.0.0", to: "1.0.0-rc.1"))
-        XCTAssertTrue(SemanticVersion.isUpgrade(from: "1.0.0-rc.2", to: "1.0.0-rc.10"))
-        XCTAssertTrue(SemanticVersion.isUpgrade(from: "2024.01.05", to: "2024.01.06"))
+    func testVersionComparatorOnlyReportsProvableUpgrades() {
+        XCTAssertTrue(VersionComparator.isUpgrade(from: "1.0.0", to: "1.0.1"))
+        XCTAssertFalse(VersionComparator.isUpgrade(from: "1.0.0", to: "1.0.0"))
+        XCTAssertFalse(VersionComparator.isUpgrade(from: "2.0.0", to: "1.9.9"))
+        XCTAssertFalse(VersionComparator.isUpgrade(from: "0.0.0-beta-18155", to: "0.0.0-beta-17823"))
+        XCTAssertTrue(VersionComparator.isUpgrade(from: "0.0.0-beta-17823", to: "0.0.0-beta-18155"))
+        XCTAssertTrue(VersionComparator.isUpgrade(from: "1.0.0-rc.1", to: "1.0.0"))
+        XCTAssertFalse(VersionComparator.isUpgrade(from: "1.0.0", to: "1.0.0-rc.1"))
+        XCTAssertTrue(VersionComparator.isUpgrade(from: "1.0.0-rc.2", to: "1.0.0-rc.10"))
+        XCTAssertTrue(VersionComparator.isUpgrade(from: "2024.01.05", to: "2024.01.06"))
         // Unrecognised schemes stay visible rather than being silently hidden.
-        XCTAssertTrue(SemanticVersion.isUpgrade(from: "weird", to: "also-weird"))
+        XCTAssertTrue(VersionComparator.isUpgrade(from: "weird", to: "also-weird"))
     }
 
     func testNpmAllowsInstallScriptsForTheRequestedPackageOnNpm12() async throws {
