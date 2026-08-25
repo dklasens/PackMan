@@ -84,6 +84,99 @@ public sealed class SourceParsingTests
     }
 
     [Fact]
+    public async Task NpmSkipsLatestDistTagThatTrailsThePrereleaseInstalled()
+    {
+        // A package tracking the beta channel sits ahead of the mutable "latest" dist-tag, and
+        // npm outdated still reports it. Offering that version would downgrade the package.
+        var runner = new StubRunner();
+        runner.Enqueue(new(1,
+            "{\"@opencode-ai/cli\":{\"current\":\"0.0.0-beta-18155\",\"wanted\":\"0.0.0-beta-17823\"," +
+            "\"latest\":\"0.0.0-beta-17823\"},\"typescript\":{\"current\":\"5.4.0\",\"latest\":\"6.0.1\"}}", ""));
+        var source = new NpmSource(new StubResolver(), runner);
+
+        var report = await source.ScanAsync(new ToolContext("npm.cmd", "12.0.2", ToolResolutionOrigin.Custom, []));
+
+        Assert.Equal("typescript", Assert.Single(report.Updates).Id);
+        Assert.Empty(report.Issues);
+    }
+
+    [Theory]
+    [InlineData("1.0.0", "1.0.1", true)]
+    [InlineData("1.0.0", "1.0.0", false)]
+    [InlineData("2.0.0", "1.9.9", false)]
+    [InlineData("0.0.0-beta-18155", "0.0.0-beta-17823", false)]
+    [InlineData("0.0.0-beta-17823", "0.0.0-beta-18155", true)]
+    [InlineData("1.0.0-rc.1", "1.0.0", true)]
+    [InlineData("1.0.0", "1.0.0-rc.1", false)]
+    [InlineData("1.0.0-rc.2", "1.0.0-rc.10", true)]
+    [InlineData("2024.01.05", "2024.01.06", true)]
+    [InlineData("weird", "also-weird", true)]
+    public void SemanticVersionOnlyReportsProvableUpgrades(string installed, string candidate, bool expected) =>
+        Assert.Equal(expected, SemanticVersion.IsUpgrade(installed, candidate));
+
+    [Fact]
+    public async Task NpmAllowsInstallScriptsForTheRequestedPackageOnNpm12()
+    {
+        var runner = new StubRunner();
+        runner.Enqueue(new(0, "added 3 packages", ""));
+        var source = new NpmSource(new StubResolver(), runner);
+
+        await source.UpdateAsync(new("@opencode-ai/cli", "@opencode-ai/cli", "1.2.3"),
+            new ToolContext("npm.cmd", "12.0.2", ToolResolutionOrigin.Custom, []));
+
+        Assert.Equal(["install", "-g", "--allow-scripts=@opencode-ai/cli", "@opencode-ai/cli@1.2.3"],
+            runner.Invocations.Single().Arguments);
+    }
+
+    [Fact]
+    public async Task NpmOmitsScriptAllowlistFlagOnOlderNpm()
+    {
+        var runner = new StubRunner();
+        runner.Enqueue(new(0, "added 3 packages", ""));
+        var source = new NpmSource(new StubResolver(), runner);
+
+        await source.UpdateAsync(new("typescript", "typescript", "6.0.1"),
+            new ToolContext("npm.cmd", "11.4.2", ToolResolutionOrigin.Custom, []));
+
+        Assert.Equal(["install", "-g", "typescript@6.0.1"], runner.Invocations.Single().Arguments);
+    }
+
+    [Fact]
+    public async Task NpmFailsWhenInstallScriptsWereBlockedForTheRequestedPackage()
+    {
+        // npm only warns about blocked scripts and still exits 0, which would otherwise report a
+        // successful update while leaving an unrunnable placeholder launcher behind.
+        var runner = new StubRunner();
+        runner.Enqueue(new(0, "added 3 packages in 8s",
+            "npm warn install-scripts 1 package had install scripts blocked because they are not covered by allowScripts\r\n" +
+            "npm warn install-scripts   @opencode-ai/cli@1.2.3 (postinstall: node ./postinstall.mjs)\r\n" +
+            "npm warn install-scripts\r\n" +
+            "npm warn install-scripts Run `npm install -g --allow-scripts=@opencode-ai/cli` to allow these scripts once.\r\n"));
+        var source = new NpmSource(new StubResolver(), runner);
+
+        var error = await Assert.ThrowsAsync<SourceException>(() => source.UpdateAsync(
+            new("@opencode-ai/cli", "@opencode-ai/cli", "1.2.3"),
+            new ToolContext("npm.cmd", "11.4.2", ToolResolutionOrigin.Custom, [])));
+
+        Assert.Equal(SourceIssueKind.Verification, error.Kind);
+        Assert.Contains("allow-scripts=@opencode-ai/cli", error.Message);
+    }
+
+    [Fact]
+    public async Task NpmIgnoresBlockedInstallScriptsForOtherPackages()
+    {
+        var runner = new StubRunner();
+        runner.Enqueue(new(0, "added 3 packages",
+            "npm warn install-scripts   some-transitive-dep@2.0.0 (postinstall: node ./build.js)\n"));
+        var source = new NpmSource(new StubResolver(), runner);
+
+        await source.UpdateAsync(new("typescript", "typescript", "6.0.1"),
+            new ToolContext("npm.cmd", "11.4.2", ToolResolutionOrigin.Custom, []));
+
+        Assert.Single(runner.Invocations);
+    }
+
+    [Fact]
     public async Task NpmTreatsMissingEmptyGlobalPrefixAsNoUpdates()
     {
         const string missingPrefix = @"Z:\PackMan-tests\missing-npm-prefix";

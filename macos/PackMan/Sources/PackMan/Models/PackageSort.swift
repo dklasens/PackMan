@@ -50,10 +50,28 @@ struct PackageSortComparator: SortComparator, Hashable, Sendable {
 
 enum VersionComparator {
     static func compare(_ lhs: String, _ rhs: String) -> ComparisonResult {
-        if let left = SemanticVersion(lhs), let right = SemanticVersion(rhs) {
-            return left.compare(to: right)
-        }
-        return lhs.compare(rhs, options: [.numeric, .caseInsensitive])
+        strictCompare(lhs, rhs) ?? lhs.compare(rhs, options: [.numeric, .caseInsensitive])
+    }
+
+    /// Like `compare`, but nil rather than a best-effort guess when either side is not a semver
+    /// version. Sorting wants a total order and can fall back; a decision about whether a version
+    /// really moves forward must not be made on a guess.
+    static func strictCompare(_ lhs: String, _ rhs: String) -> ComparisonResult? {
+        guard let left = SemanticVersion(lhs), let right = SemanticVersion(rhs) else { return nil }
+        return left.compare(to: right)
+    }
+
+    /// True when `candidate` is newer than `installed`, or when either side cannot be parsed.
+    /// Unparseable versions stay visible on purpose: an unfamiliar versioning scheme should not
+    /// silently hide an update, and callers only use this to suppress provably backwards moves.
+    static func isUpgrade(from installed: String, to candidate: String) -> Bool {
+        let installed = installed.trimmed
+        let candidate = candidate.trimmed
+        guard !candidate.isEmpty else { return false }
+        guard !installed.isEmpty else { return true }
+        guard installed != candidate else { return false }
+        guard let order = strictCompare(candidate, installed) else { return true }
+        return order == .orderedDescending
     }
 }
 

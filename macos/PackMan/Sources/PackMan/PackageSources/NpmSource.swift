@@ -68,7 +68,10 @@ struct NpmSource: PackageSource {
                 continue
             }
             let current = entry.current?.trimmed ?? ""
-            guard current != latest else { continue }
+            // npm reports the "latest" dist-tag even when it trails what is installed, which is
+            // routine for a package tracking a prerelease channel. Installing that version would
+            // be a downgrade, so only offer versions that provably move forward.
+            guard VersionComparator.isUpgrade(from: current, to: latest) else { continue }
             updates.append(PackageInfo(
                 id: name,
                 name: name,
@@ -89,13 +92,59 @@ struct NpmSource: PackageSource {
         guard PackageIdValidator.isValidVersion(request.targetVersion) else {
             throw SourceError.invalidTargetVersion(request.targetVersion)
         }
+        var arguments = ["install", "-g"]
+        if NpmSource.supportsScriptAllowlist(context.version) {
+            arguments.append("--allow-scripts=\(request.packageID)")
+        }
+        arguments.append("\(request.packageID)@\(request.targetVersion)")
         let result = try await runner.run(
             context.executablePath,
-            ["install", "-g", "\(request.packageID)@\(request.targetVersion)"],
+            arguments,
             timeout: 600,
             environment: SourceSupport.environment(pathEntries: context.pathEntries),
             onOutput: onOutput)
         guard result.succeeded else { throw SourceSupport.commandFailure("npm install", result: result) }
+
+        let blocked = NpmSource.blockedScriptPackages(in: result.stdout + "\n" + result.stderr)
+        guard !blocked.contains(where: { $0.caseInsensitiveCompare(request.packageID) == .orderedSame }) else {
+            throw SourceError.verificationFailed(
+                "npm installed \(request.packageID) \(request.targetVersion) but blocked its install scripts, "
+                + "so the package may be left with a placeholder launcher that cannot run. "
+                + "Run `npm config set allow-scripts=\(request.packageID) --location=user` and update again.")
+        }
+    }
+
+    // npm 12 stopped running package install scripts unless the package is allowlisted. CLIs that
+    // ship a placeholder launcher for their postinstall to replace with a real binary are left
+    // unrunnable when that is skipped, and npm still exits 0. Allow scripts only for the single
+    // package the user chose to update; everything else stays blocked.
+    static let scriptAllowlistNpmMajor = 12
+
+    static func supportsScriptAllowlist(_ version: String) -> Bool {
+        let token = version.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? ""
+        let core = token.hasPrefix("v") ? String(token.dropFirst()) : token
+        guard let major = core.split(separator: ".").first.map(String.init), let value = Int(major) else {
+            return false
+        }
+        return value >= scriptAllowlistNpmMajor
+    }
+
+    // npm reports each skipped package as `npm warn install-scripts <name>@<version> (...)`.
+    // The surrounding prose lines carry no name@version token and fall out here.
+    static func blockedScriptPackages(in output: String) -> [String] {
+        var names: [String] = []
+        for rawLine in output.split(whereSeparator: \.isNewline) {
+            let line = String(rawLine).trimmed
+            guard line.hasPrefix("npm warn ") || line.hasPrefix("npm error "),
+                  let marker = line.range(of: "install-scripts") else { continue }
+            let remainder = String(line[marker.upperBound...]).trimmed
+            guard let token = remainder.split(whereSeparator: \.isWhitespace).first.map(String.init),
+                  let separator = token.lastIndex(of: "@"), separator != token.startIndex else { continue }
+            let name = String(token[token.startIndex..<separator])
+            guard !name.isEmpty, !names.contains(name) else { continue }
+            names.append(name)
+        }
+        return names
     }
 
     func verify(

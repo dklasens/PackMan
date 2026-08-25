@@ -58,6 +58,10 @@ public sealed class NpmSource(IToolResolver resolver, IProcessRunner runner) : P
         {
             if (!PackageIdValidator.IsValid(id)) { issues.Add(new(SourceIssueKind.Parsing, "npm returned an invalid package identifier.")); continue; }
             if (string.IsNullOrWhiteSpace(entry.Latest)) { issues.Add(new(SourceIssueKind.Parsing, $"{id}: npm did not return a latest version.")); continue; }
+            // npm reports the "latest" dist-tag even when it trails what is installed, which is
+            // routine for a package tracking a prerelease channel. Installing that version would
+            // be a downgrade, so only offer versions that provably move forward.
+            if (!SemanticVersion.IsUpgrade(entry.Current, entry.Latest)) continue;
             updates.Add(new(id, id, entry.Current ?? string.Empty, entry.Latest));
         }
         return new(updates, issues);
@@ -79,10 +83,53 @@ public sealed class NpmSource(IToolResolver resolver, IProcessRunner runner) : P
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
     {
         Validate(request);
+        var arguments = new List<string> { "install", "-g" };
+        if (SupportsScriptAllowlist(context.Version)) arguments.Add($"--allow-scripts={request.PackageId}");
+        arguments.Add($"{request.PackageId}@{request.TargetVersion}");
         var result = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
-            Arguments(context, "install", "-g", $"{request.PackageId}@{request.TargetVersion}"),
+            Arguments(context, [.. arguments]),
             context.Environment, TimeSpan.FromMinutes(15), request.Elevated), output, cancellationToken);
         if (!result.Success) throw SourceSupport.CommandFailure("npm install", result);
+        if (BlockedScriptPackages($"{result.StdOut}\n{result.StdErr}")
+            .Any(name => string.Equals(name, request.PackageId, StringComparison.OrdinalIgnoreCase)))
+            throw new SourceException(SourceIssueKind.Verification,
+                $"npm installed {request.PackageId} {request.TargetVersion} but blocked its install scripts, " +
+                "so the package may be left with a placeholder launcher that cannot run. Run " +
+                $"`npm config set allow-scripts={request.PackageId} --location=user` and update again.");
+    }
+
+    // npm 12 stopped running package install scripts unless the package is allowlisted. CLIs
+    // that ship a placeholder launcher for their postinstall to replace with a real binary are
+    // left unrunnable when that is skipped, and npm still exits 0. Allow scripts only for the
+    // single package the user chose to update; everything else stays blocked.
+    internal const int ScriptAllowlistNpmMajor = 12;
+
+    internal static bool SupportsScriptAllowlist(string? version)
+    {
+        if (string.IsNullOrWhiteSpace(version)) return false;
+        var token = version.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+        if (string.IsNullOrEmpty(token)) return false;
+        var major = token.TrimStart('v').Split('.')[0];
+        return int.TryParse(major, out var value) && value >= ScriptAllowlistNpmMajor;
+    }
+
+    // npm reports each skipped package as `npm warn install-scripts <name>@<version> (...)`.
+    // The surrounding prose lines carry no name@version token and fall out here.
+    private static readonly Regex BlockedScriptPattern = new(
+        @"(?im)^npm\s+(?:warn|error)\s+install-scripts\s+(?<spec>\S+)", RegexOptions.Compiled);
+
+    internal static IReadOnlyList<string> BlockedScriptPackages(string output)
+    {
+        var names = new List<string>();
+        foreach (Match match in BlockedScriptPattern.Matches(output))
+        {
+            var spec = match.Groups["spec"].Value;
+            var separator = spec.LastIndexOf('@');
+            if (separator <= 0) continue;
+            var name = spec[..separator];
+            if (!names.Contains(name, StringComparer.OrdinalIgnoreCase)) names.Add(name);
+        }
+        return names;
     }
 
     private static readonly Regex ErrorPathPattern = new(
