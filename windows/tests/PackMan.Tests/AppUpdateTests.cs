@@ -208,6 +208,109 @@ public sealed class AppUpdateTests
     }
 
     [Fact]
+    public async Task ApplyReplacesATargetLockedLikeARunningExecutable()
+    {
+        // Windows keeps a running executable's image open with FileShare.Read | FileShare.Delete:
+        // it cannot be written in place, but it can be renamed. The helper runs from the very
+        // executable it replaces, so this - not a free-standing file - is the shape of every real
+        // self-update. Copying straight over the target fails here with a sharing violation.
+        var stagingRoot = Path.Combine(Path.GetTempPath(), "PackMan", $"test-{Guid.NewGuid():N}");
+        var installRoot = Path.Combine(Path.GetTempPath(), "PackMan", $"test-install-{Guid.NewGuid():N}");
+        var staged = Path.Combine(stagingRoot, "staged", "PackMan.exe");
+        var target = Path.Combine(installRoot, "PackMan.exe");
+        Directory.CreateDirectory(Path.GetDirectoryName(staged)!);
+        Directory.CreateDirectory(installRoot);
+        File.WriteAllText(staged, "new-bits");
+        File.WriteAllText(target, "old-bits");
+        var relaunched = new List<string>();
+        UpdateApplier.RelaunchOverride = relaunched.Add;
+        var parentId = LaunchAlreadyExitedProcess();
+        try
+        {
+            using (new FileStream(target, FileMode.Open, FileAccess.Read,
+                FileShare.Read | FileShare.Delete))
+            {
+                var ok = await UpdateApplier.RunCoreAsync(parentId, staged, target, stagingRoot, target);
+                Assert.True(ok);
+                Assert.Equal("new-bits", File.ReadAllText(target));
+                Assert.Equal([target], relaunched);
+            }
+            Assert.Equal("old-bits", File.ReadAllText(target + UpdateApplier.BackupSuffix));
+        }
+        finally
+        {
+            UpdateApplier.RelaunchOverride = null;
+            if (Directory.Exists(installRoot)) Directory.Delete(installRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ApplyRestoresTheOldExecutableWhenTheSwapFails()
+    {
+        // Moving the target aside before copying means a failure halfway through would otherwise
+        // leave the install with no executable at all.
+        var stagingRoot = Path.Combine(Path.GetTempPath(), "PackMan", $"test-{Guid.NewGuid():N}");
+        var installRoot = Path.Combine(Path.GetTempPath(), "PackMan", $"test-install-{Guid.NewGuid():N}");
+        var staged = Path.Combine(stagingRoot, "staged", "PackMan.exe");
+        var target = Path.Combine(installRoot, "PackMan.exe");
+        Directory.CreateDirectory(Path.GetDirectoryName(staged)!);
+        Directory.CreateDirectory(installRoot);
+        File.WriteAllText(staged, "new-bits");
+        File.WriteAllText(target, "old-bits");
+        var relaunched = new List<string>();
+        UpdateApplier.RelaunchOverride = relaunched.Add;
+        var window = UpdateApplier.RetryWindow;
+        UpdateApplier.RetryWindow = TimeSpan.Zero;
+        var parentId = LaunchAlreadyExitedProcess();
+        try
+        {
+            // Hold the staged build exclusively so the copy cannot read it.
+            using (new FileStream(staged, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                var ok = await UpdateApplier.RunCoreAsync(parentId, staged, target, stagingRoot, target);
+                Assert.False(ok);
+            }
+            Assert.Equal("old-bits", File.ReadAllText(target));
+            Assert.False(File.Exists(target + UpdateApplier.BackupSuffix));
+            Assert.Empty(relaunched);
+        }
+        finally
+        {
+            UpdateApplier.RelaunchOverride = null;
+            UpdateApplier.RetryWindow = window;
+            if (Directory.Exists(installRoot)) Directory.Delete(installRoot, recursive: true);
+            if (Directory.Exists(stagingRoot)) Directory.Delete(stagingRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ApplyClearsTheBackupLeftByThePreviousUpdate()
+    {
+        var stagingRoot = Path.Combine(Path.GetTempPath(), "PackMan", $"test-{Guid.NewGuid():N}");
+        var installRoot = Path.Combine(Path.GetTempPath(), "PackMan", $"test-install-{Guid.NewGuid():N}");
+        var staged = Path.Combine(stagingRoot, "staged", "PackMan.exe");
+        var target = Path.Combine(installRoot, "PackMan.exe");
+        Directory.CreateDirectory(Path.GetDirectoryName(staged)!);
+        Directory.CreateDirectory(installRoot);
+        File.WriteAllText(staged, "new-bits");
+        File.WriteAllText(target, "old-bits");
+        File.WriteAllText(target + UpdateApplier.BackupSuffix, "ancient-bits");
+        UpdateApplier.RelaunchOverride = _ => { };
+        var parentId = LaunchAlreadyExitedProcess();
+        try
+        {
+            Assert.True(await UpdateApplier.RunCoreAsync(parentId, staged, target, stagingRoot, target));
+            Assert.Equal("new-bits", File.ReadAllText(target));
+            Assert.Equal("old-bits", File.ReadAllText(target + UpdateApplier.BackupSuffix));
+        }
+        finally
+        {
+            UpdateApplier.RelaunchOverride = null;
+            if (Directory.Exists(installRoot)) Directory.Delete(installRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ApplyRefusesTargetsOtherThanItself()
     {
         var stagingRoot = Path.Combine(Path.GetTempPath(), "PackMan", $"test-{Guid.NewGuid():N}");

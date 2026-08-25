@@ -32,6 +32,7 @@ public partial class App : Application
             Shutdown(await UpdateApplier.RunAsync(e.Args));
             return;
         }
+        UpdateApplier.CleanUpBackup();
 
         var services = new ServiceCollection();
         services.AddSingleton<IElevationBroker, ElevationBroker>();

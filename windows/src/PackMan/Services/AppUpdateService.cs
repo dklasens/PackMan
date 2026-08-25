@@ -199,8 +199,22 @@ public sealed class AppUpdateService(HttpClient httpClient, ISettingsService set
 public static class UpdateApplier
 {
     internal const string ApplyArgument = "--apply-update";
+    internal const string BackupSuffix = ".old";
     private static readonly TimeSpan ExitWait = TimeSpan.FromSeconds(120);
-    private static readonly TimeSpan CopyWindow = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan RelaunchWait = TimeSpan.FromSeconds(10);
+
+    /// <summary>How long a swap step keeps retrying while the file is still held.</summary>
+    internal static TimeSpan RetryWindow { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Removes the previous build left beside the executable by <see cref="ReplaceExecutableAsync"/>.
+    /// Best effort: in a protected folder this only succeeds for the next elevated update helper,
+    /// which clears it before swapping again.
+    /// </summary>
+    public static void CleanUpBackup()
+    {
+        if (Environment.ProcessPath is { } executable) TryDelete(executable + BackupSuffix);
+    }
 
     internal static Action<string>? RelaunchOverride { get; set; }
 
@@ -233,7 +247,7 @@ public static class UpdateApplier
         if (own is null || !IsTrusted(stagedExecutable, targetExecutable, stagingRoot, own))
             return false;
         await WaitForExitAsync(parentId);
-        if (!await CopyWithRetryAsync(stagedExecutable, targetExecutable)) return false;
+        if (!await ReplaceExecutableAsync(stagedExecutable, targetExecutable)) return false;
         try { Relaunch(targetExecutable); }
         catch (Exception ex) { LogFailure(ex); }
         TryDeleteDirectory(stagingRoot);
@@ -271,14 +285,34 @@ public static class UpdateApplier
         await Task.Delay(250);
     }
 
-    private static async Task<bool> CopyWithRetryAsync(string source, string destination)
+    /// <summary>
+    /// Swaps the new build in. The helper runs from the executable it is replacing - IsTrusted
+    /// requires exactly that, so the target can only ever be PackMan's own path - which means
+    /// Windows holds the target's image open and it can never be overwritten in place. Renaming
+    /// a running image is allowed, so move it aside first and copy into the freed path. Any
+    /// failure puts the backup back so the install is never left without an executable.
+    /// </summary>
+    private static async Task<bool> ReplaceExecutableAsync(string source, string destination)
     {
-        var deadline = DateTime.UtcNow + CopyWindow;
+        var backup = destination + BackupSuffix;
+        // A backup from the previous update is still held by that helper until it exits, so it
+        // is cleared here - while this helper is elevated - rather than after the swap.
+        TryDelete(backup);
+        if (!await RetryAsync(() => File.Move(destination, backup, overwrite: true))) return false;
+        if (await RetryAsync(() => File.Copy(source, destination, overwrite: true))) return true;
+        try { File.Move(backup, destination, overwrite: true); }
+        catch (Exception ex) { LogFailure(ex); }
+        return false;
+    }
+
+    private static async Task<bool> RetryAsync(Action operation)
+    {
+        var deadline = DateTime.UtcNow + RetryWindow;
         while (true)
         {
             try
             {
-                File.Copy(source, destination, overwrite: true);
+                operation();
                 return true;
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -293,6 +327,11 @@ public static class UpdateApplier
         }
     }
 
+    internal static void TryDelete(string path)
+    {
+        try { File.Delete(path); } catch { }
+    }
+
     private static void Relaunch(string executable)
     {
         if (RelaunchOverride is { } relaunch)
@@ -300,7 +339,50 @@ public static class UpdateApplier
             relaunch(executable);
             return;
         }
+        // Starting the app from an elevated helper would hand it the administrator token, so
+        // PackMan - and every package manager it spawns - would stay elevated for the rest of
+        // the session, which the app otherwise never does without asking. Going through Explorer
+        // re-parents the launch to the shell, which runs at the user's own integrity level.
+        // Explorer reports nothing back, so fall back to a direct start if nothing comes up.
+        if (ProcessRunner.IsCurrentProcessElevated && TryRelaunchViaShell(executable)) return;
         Process.Start(new ProcessStartInfo(executable) { UseShellExecute = true });
+    }
+
+    private static bool TryRelaunchViaShell(string executable)
+    {
+        try
+        {
+            using var shell = Process.Start(new ProcessStartInfo("explorer.exe", $"\"{executable}\"")
+            {
+                UseShellExecute = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
+            });
+        }
+        catch (Exception ex)
+        {
+            LogFailure(ex);
+            return false;
+        }
+        return WaitForRelaunch(executable);
+    }
+
+    private static bool WaitForRelaunch(string executable)
+    {
+        var name = Path.GetFileNameWithoutExtension(executable);
+        var self = Environment.ProcessId;
+        var deadline = DateTime.UtcNow + RelaunchWait;
+        while (DateTime.UtcNow < deadline)
+        {
+            foreach (var process in Process.GetProcessesByName(name))
+            {
+                using (process)
+                {
+                    if (process.Id != self) return true;
+                }
+            }
+            Thread.Sleep(200);
+        }
+        return false;
     }
 
     private static void TryDeleteDirectory(string path)
