@@ -220,6 +220,120 @@ final class SourceParsingTests: XCTestCase {
         XCTAssertTrue(report.issues.isEmpty)
     }
 
+    func testNpmSkipsLatestDistTagThatTrailsThePrereleaseInstalled() async throws {
+        // A package tracking the beta channel sits ahead of the mutable "latest" dist-tag, and
+        // npm outdated still reports it. Offering that version would downgrade the package.
+        let runner = StubProcessRunner()
+        let json = """
+        {"@opencode-ai/cli":{"current":"0.0.0-beta-18155","wanted":"0.0.0-beta-17823",\
+        "latest":"0.0.0-beta-17823"},"typescript":{"current":"5.4.0","latest":"6.0.1"}}
+        """
+        await runner.enqueue(
+            arguments: ["outdated", "-g", "--json"],
+            stub: .init(result: ProcessResult(exitCode: 1, stdout: json, stderr: "")))
+        let source = NpmSource(runner: runner, resolver: StubResolver(resolution: .notFound))
+
+        let report = try await source.scan(context: testToolContext) { _ in }
+
+        XCTAssertEqual(report.updates.map(\.id), ["typescript"])
+        XCTAssertTrue(report.issues.isEmpty)
+    }
+
+    func testSemanticVersionOnlyReportsProvableUpgrades() {
+        XCTAssertTrue(SemanticVersion.isUpgrade(from: "1.0.0", to: "1.0.1"))
+        XCTAssertFalse(SemanticVersion.isUpgrade(from: "1.0.0", to: "1.0.0"))
+        XCTAssertFalse(SemanticVersion.isUpgrade(from: "2.0.0", to: "1.9.9"))
+        XCTAssertFalse(SemanticVersion.isUpgrade(from: "0.0.0-beta-18155", to: "0.0.0-beta-17823"))
+        XCTAssertTrue(SemanticVersion.isUpgrade(from: "0.0.0-beta-17823", to: "0.0.0-beta-18155"))
+        XCTAssertTrue(SemanticVersion.isUpgrade(from: "1.0.0-rc.1", to: "1.0.0"))
+        XCTAssertFalse(SemanticVersion.isUpgrade(from: "1.0.0", to: "1.0.0-rc.1"))
+        XCTAssertTrue(SemanticVersion.isUpgrade(from: "1.0.0-rc.2", to: "1.0.0-rc.10"))
+        XCTAssertTrue(SemanticVersion.isUpgrade(from: "2024.01.05", to: "2024.01.06"))
+        // Unrecognised schemes stay visible rather than being silently hidden.
+        XCTAssertTrue(SemanticVersion.isUpgrade(from: "weird", to: "also-weird"))
+    }
+
+    func testNpmAllowsInstallScriptsForTheRequestedPackageOnNpm12() async throws {
+        let runner = StubProcessRunner()
+        await runner.enqueueAny(stub: .init(result: ProcessResult(exitCode: 0, stdout: "added 3 packages", stderr: "")))
+        let source = NpmSource(runner: runner, resolver: StubResolver(resolution: .notFound))
+        let context = ToolContext(
+            executablePath: "/test/npm",
+            version: "12.0.2",
+            pathEntries: ["/test"],
+            origin: .knownPath)
+
+        try await source.update(
+            request: UpdateRequest(packageID: "@opencode-ai/cli", name: "@opencode-ai/cli", targetVersion: "1.2.3"),
+            context: context) { _ in }
+
+        let invocations = await runner.invocations
+        XCTAssertEqual(
+            invocations.last?.arguments,
+            ["install", "-g", "--allow-scripts=@opencode-ai/cli", "@opencode-ai/cli@1.2.3"])
+    }
+
+    func testNpmOmitsScriptAllowlistFlagOnOlderNpm() async throws {
+        let runner = StubProcessRunner()
+        await runner.enqueueAny(stub: .init(result: ProcessResult(exitCode: 0, stdout: "added 3 packages", stderr: "")))
+        let source = NpmSource(runner: runner, resolver: StubResolver(resolution: .notFound))
+        let context = ToolContext(
+            executablePath: "/test/npm",
+            version: "11.4.2",
+            pathEntries: ["/test"],
+            origin: .knownPath)
+
+        try await source.update(
+            request: UpdateRequest(packageID: "typescript", name: "typescript", targetVersion: "6.0.1"),
+            context: context) { _ in }
+
+        let invocations = await runner.invocations
+        XCTAssertEqual(invocations.last?.arguments, ["install", "-g", "typescript@6.0.1"])
+    }
+
+    func testNpmFailsWhenInstallScriptsWereBlockedForTheRequestedPackage() async throws {
+        // npm only warns about blocked scripts and still exits 0, which would otherwise report a
+        // successful update while leaving an unrunnable placeholder launcher behind.
+        let stderr = """
+        npm warn install-scripts 1 package had install scripts blocked because they are not covered by allowScripts
+        npm warn install-scripts   @opencode-ai/cli@1.2.3 (postinstall: node ./postinstall.mjs)
+        npm warn install-scripts
+        npm warn install-scripts Run `npm install -g --allow-scripts=@opencode-ai/cli` to allow these scripts once.
+        """
+        let runner = StubProcessRunner()
+        await runner.enqueueAny(
+            stub: .init(result: ProcessResult(exitCode: 0, stdout: "added 3 packages in 8s", stderr: stderr)))
+        let source = NpmSource(runner: runner, resolver: StubResolver(resolution: .notFound))
+
+        do {
+            try await source.update(
+                request: UpdateRequest(packageID: "@opencode-ai/cli", name: "@opencode-ai/cli", targetVersion: "1.2.3"),
+                context: testToolContext) { _ in }
+            XCTFail("Expected blocked install scripts to fail the update")
+        } catch let error as SourceError {
+            guard case .verificationFailed(let message) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertTrue(message.contains("allow-scripts=@opencode-ai/cli"), message)
+        }
+    }
+
+    func testNpmIgnoresBlockedInstallScriptsForOtherPackages() async throws {
+        let runner = StubProcessRunner()
+        await runner.enqueueAny(stub: .init(result: ProcessResult(
+            exitCode: 0,
+            stdout: "added 3 packages",
+            stderr: "npm warn install-scripts   some-transitive-dep@2.0.0 (postinstall: node ./build.js)")))
+        let source = NpmSource(runner: runner, resolver: StubResolver(resolution: .notFound))
+
+        try await source.update(
+            request: UpdateRequest(packageID: "typescript", name: "typescript", targetVersion: "6.0.1"),
+            context: testToolContext) { _ in }
+
+        let invocations = await runner.invocations
+        XCTAssertEqual(invocations.count, 1)
+    }
+
     func testNpmVerifyConfirmsAllRequestsInOneCall() async throws {
         let runner = StubProcessRunner()
         let json = #"{"dependencies":{"a":{"version":"2.0.0"},"b":{"version":"1.0.0"}}}"#
