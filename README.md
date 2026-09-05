@@ -7,6 +7,12 @@ PackMan has two native streams sharing one repo:
 - **`windows/`** — PackMan for Windows, built with WPF on .NET 10
 - **`macos/`** — SwiftUI (native macOS app)
 
+## Latest release: v1.9
+
+Windows 1.9 adds package details and recovery actions, persistent update history with diagnostic export, and per-source cache previews and cleanup. It also fixes update verification, Chocolatey reboot handling, WinGet identity handling, and self-update reliability. The release includes the existing macOS app rebuilt as a universal version 1.9 app.
+
+See the [v1.9 release notes and downloads](https://github.com/dklasens/PackMan/releases/tag/v1.9) for the full changes, requirements, and upgrade guidance, or read the [notes in this repository](.github/release-notes/v1.9.md).
+
 ## What it does
 
 Pick which sources to include, hit **Scan**, select the packages you want, and click **Update Selected**. Progress and command output are shown in a built-in log.
