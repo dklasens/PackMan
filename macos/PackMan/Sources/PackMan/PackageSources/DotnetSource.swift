@@ -45,7 +45,7 @@ struct DotnetSource: PackageSource {
             context.executablePath,
             ["tool", "list", "--global"],
             timeout: 60,
-            environment: SourceSupport.environment(pathEntries: context.pathEntries))
+            environment: SourceSupport.environment(pathEntries: context.pathEntries, additions: ["DOTNET_CLI_UI_LANGUAGE": "en-US"]))
         guard result.succeeded else { throw SourceSupport.commandFailure("dotnet tool list", result: result) }
 
         let parsed = DotnetToolListParser.parse(result.stdout)
@@ -54,7 +54,7 @@ struct DotnetSource: PackageSource {
             var results: [DotnetLookup] = []
 
             func enqueue() {
-                guard let tool = iterator.next() else { return }
+                guard !Task.isCancelled, let tool = iterator.next() else { return }
                 group.addTask {
                     await lookupNuGet(id: tool.id, currentVersion: tool.version)
                 }
@@ -217,6 +217,7 @@ enum DotnetToolListParser {
             }
             tools.append(Tool(id: fields[0], version: fields[1]))
         }
+        if !inTable { issues.append(SourceIssue(kind: .parsing, message: "dotnet tool list did not return a recognised installed-package table.")) }
         return Result(tools: tools, issues: issues)
     }
 }

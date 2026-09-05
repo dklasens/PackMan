@@ -71,8 +71,10 @@ struct UpdateRunSummary: Sendable, Equatable {
     var failed = 0
     var cancelled = 0
     var verificationFailed = 0
+    var verified = 0
+    var notStarted = 0
 
-    var total: Int { updated + failed + cancelled + verificationFailed }
+    var total: Int { updated + failed + cancelled + verificationFailed + verified + notStarted }
 }
 
 struct LogEntry: Identifiable, Sendable, Equatable {

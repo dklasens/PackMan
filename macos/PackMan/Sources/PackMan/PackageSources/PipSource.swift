@@ -61,7 +61,7 @@ print(json.dumps(list(dependents.values()), ensure_ascii=True))
             timeout: 180,
             environment: SourceSupport.environment(pathEntries: context.pathEntries))
         guard result.succeeded else { throw SourceError.commandFailed(Self.friendlyFailure("pip list", result)) }
-        guard !result.stdout.trimmed.isEmpty else { return SourceScanReport() }
+        guard !result.stdout.trimmed.isEmpty else { throw SourceError.commandFailed("pip returned empty output instead of JSON.") }
         guard let data = result.stdout.data(using: .utf8) else {
             throw SourceError.commandFailed("pip list returned non-UTF-8 output.")
         }

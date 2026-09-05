@@ -105,45 +105,24 @@ final class SourceParsingTests: XCTestCase {
         XCTAssertTrue(issue.recovery?.contains("mdutil") == true)
     }
 
-    func testMasVerifyToleratesIndexingIssuesAfterUpdate() async throws {
+    func testMasVerifyRejectsIndexingIssues() async throws {
         let runner = StubProcessRunner()
-        await runner.enqueue(
-            arguments: ["outdated"],
-            stub: .init(result: ProcessResult(
-                exitCode: 0,
-                stdout: "",
-                stderr: "Warning: Found a likely App Store app that is not indexed in Spotlight in /Applications/Speedtest.app")))
-        let source = MasSource(
-            runner: runner,
-            resolver: StubResolver(resolution: .notFound),
-            verificationDelay: .zero)
-        let verification = try await source.verify(
-            requests: [UpdateRequest(packageID: "6445813049", name: "Spark Desktop", targetVersion: "3.30.5")],
-            context: masToolContext(executablePath: "/test/mas"))
-        guard case .satisfied(let installed) = verification["6445813049"] else {
-            return XCTFail("Expected satisfied verification")
-        }
-        XCTAssertEqual(installed, "3.30.5")
+        await runner.enqueue(arguments: ["list"], stub: .init(result: ProcessResult(exitCode: 0, stdout: "",
+            stderr: "Warning: Found a likely App Store app that is not indexed in Spotlight in /Applications/Speedtest.app")))
+        let source = MasSource(runner: runner, verificationDelay: .zero)
+        do {
+            _ = try await source.verify(requests: [UpdateRequest(packageID: "123", name: "App", targetVersion: "2")], context: masToolContext(executablePath: "/test/mas"))
+            XCTFail("Incomplete inventory must not verify")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("Spotlight")) }
     }
 
-    func testMasVerifyReportsStillOutdatedWhenAppRemainsListed() async throws {
+    func testMasVerifyReadsObservedInstalledVersion() async throws {
         let runner = StubProcessRunner()
-        await runner.enqueue(
-            arguments: ["outdated"],
-            stub: .init(result: ProcessResult(
-                exitCode: 0,
-                stdout: "6445813049  Spark Desktop  (3.30.4 -> 3.30.5)\n",
-                stderr: "")))
-        let source = MasSource(
-            runner: runner,
-            resolver: StubResolver(resolution: .notFound),
-            verificationDelay: .zero)
-        let verification = try await source.verify(
-            requests: [UpdateRequest(packageID: "6445813049", name: "Spark Desktop", targetVersion: "3.30.5")],
-            context: masToolContext(executablePath: "/test/mas"))
-        guard case .stillOutdated(let info) = verification["6445813049"] else {
-            return XCTFail("Expected still-outdated verification")
-        }
+        await runner.enqueue(arguments: ["list"], stub: .init(result: ProcessResult(exitCode: 0,
+            stdout: "6445813049 Spark Desktop (3.30.4)\n", stderr: "")))
+        let source = MasSource(runner: runner, verificationDelay: .zero)
+        let verification = try await source.verify(requests: [UpdateRequest(packageID: "6445813049", name: "Spark Desktop", targetVersion: "3.30.5")], context: masToolContext(executablePath: "/test/mas"))
+        guard case .stillOutdated(let info) = verification["6445813049"] else { return XCTFail("Expected outdated") }
         XCTAssertEqual(info.currentVersion, "3.30.4")
     }
 

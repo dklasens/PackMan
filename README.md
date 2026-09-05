@@ -7,15 +7,17 @@ PackMan has two native streams sharing one repo:
 - **`windows/`** — PackMan for Windows, built with WPF on .NET 10
 - **`macos/`** — SwiftUI (native macOS app)
 
-## Latest release: v1.9
+## Latest release: v1.9.1
 
-Windows 1.9 adds package details and recovery actions, persistent update history with diagnostic export, and per-source cache previews and cleanup. It also fixes update verification, Chocolatey reboot handling, WinGet identity handling, and self-update reliability. The release includes the existing macOS app rebuilt as a universal version 1.9 app.
+macOS 1.9.1 adds package details and recovery, persistent history and diagnostic export, configured cache previews, source setup, UI polish, and improvements to verification, cancellation and self-update. This release also includes the latest Windows 1.9 implementation rebuilt as v1.9.1; Windows functionality is unchanged.
 
-See the [v1.9 release notes and downloads](https://github.com/dklasens/PackMan/releases/tag/v1.9) for the full changes, requirements, and upgrade guidance, or read the [notes in this repository](.github/release-notes/v1.9.md).
+See the [v1.9.1 release notes and downloads](https://github.com/dklasens/PackMan/releases/tag/v1.9.1), [changelog](CHANGELOG.md), or [release notes in this repository](.github/release-notes/v1.9.1.md).
 
 ## What it does
 
 Pick which sources to include, hit **Scan**, select the packages you want, and click **Update Selected**. Progress and command output are shown in a built-in log.
+
+See the [Mac implementation and validation notes](MACOS_IMPLEMENTATION_1.9.md) for technical details and test coverage.
 
 ### macOS sources
 
@@ -24,7 +26,7 @@ Pick which sources to include, hit **Scan**, select the packages you want, and c
 - **Mac App Store** (via [mas](https://github.com/mas-cli/mas))
 - **npm** (global packages)
 - **pip** (Python packages)
-- **pipx** (Python CLI tools, checked against PyPI)
+- **pipx** (Python CLI tools; native checks where supported, otherwise limited public PyPI estimates)
 - **.NET Tools** (dotnet global tools, checked against nuget.org)
 
 ### Windows sources
@@ -51,11 +53,17 @@ The app is ad-hoc signed and cannot be notarized because this project does not u
 >
 > The App Store source needs mas 4 or newer (`brew upgrade mas`) and an Apple Account signed in to the App Store. Update detection depends on Spotlight indexing and Apple's catalog, so fresh releases can take a while to appear, and apps that are not Spotlight-indexed or were installed via Apple Business Manager cannot be updated through mas; use **Open in App Store** instead. On macOS 14 (Sonoma) the mas wrapper also needs `jq` (`brew install jq`); macOS 15 and later ship it.
 >
-> **Clear Cache** in the toolbar purges downloaded installers and package caches (also available per source), and the search field filters the package list.
+> **Mac 1.9.1:** Click a package name, or press **⌘I**, for full identity, tool paths, observed/requested versions, warnings, verification evidence, and attempt output. **Update / retry install** runs the manager; **Verify again** only checks installed inventory. App Store rows have a manual handoff and are excluded from automatic selection.
+>
+> **Activity → Update History** (**⇧⌘H**) keeps the latest 500 attempts in `~/Library/Application Support/PackMan/update-history.json`, including interrupted and not-started packages. Diagnostics are redacted and previewed before saving; review the preview before sharing it.
+>
+> **Package Caches…** opens configured locations, estimated sizes, and cleanup scope. **Clear Selected…** refreshes the preview and asks for confirmation. Homebrew formulae/casks share cleanup, which can also remove old installed versions. NuGet global-package removal requires its separate option. App Store caches remain managed by macOS.
+>
+> **Sources** can recheck installed managers without changing your selections, show their environment, and optionally include self-updating Homebrew casks. Existing source choices are preserved. Source/status/search filters affect visibility; update actions operate on checked, visible, automatic updates, with visible and total selections shown separately. Window and table-column preferences persist.
 
 Updates can be ignored for one version or for a package entirely from the table's context menu, then restored from **Sources → Ignored Updates**.
 
-> PackMan checks GitHub once a day for a newer release and shows a banner when one is available. **Install and Restart** downloads `PackMan-macOS.zip`, verifies it against the published SHA-256 checksum, replaces the app, and relaunches it. **Skip** hides that version; **PackMan → Check for Updates…** checks immediately. The first time you open a browser-downloaded zip or disk image you may still need **Open Anyway**.
+> PackMan checks GitHub once a day for a newer release and shows a banner when one is available. **Install and Restart** downloads `PackMan-macOS.zip`, verifies the checksum, bundle identity, version, architecture and signature, then stages a recoverable replacement and relaunches it. The helper retains a result log in `~/Library/Application Support/PackMan/self-update.log`. **Skip** hides that version; **PackMan → Check for Updates…** checks immediately. The first time you open a browser-downloaded zip or disk image you may still need **Open Anyway**.
 
 ### Windows
 

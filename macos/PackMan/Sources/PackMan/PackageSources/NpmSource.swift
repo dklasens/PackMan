@@ -41,7 +41,7 @@ struct NpmSource: PackageSource {
         guard result.exitCode == 0 || result.exitCode == 1 else {
             throw SourceSupport.commandFailure("npm outdated", result: result)
         }
-        guard !result.stdout.trimmed.isEmpty else { return SourceScanReport() }
+        guard !result.stdout.trimmed.isEmpty else { throw SourceError.commandFailed("npm returned empty output instead of JSON.") }
         guard let data = result.stdout.data(using: .utf8) else {
             throw SourceError.commandFailed("npm outdated returned non-UTF-8 output.")
         }
@@ -163,22 +163,10 @@ struct NpmSource: PackageSource {
             throw SourceError.verificationFailed("npm could not confirm the installed versions.")
         }
 
-        var verification: [String: UpdateVerification] = [:]
-        for request in requests {
-            guard let installed = list.dependencies?[request.packageID]?.version else {
-                throw SourceError.verificationFailed("npm could not confirm the installed version of \(request.name).")
-            }
-            if installed == request.targetVersion {
-                verification[request.packageID] = .satisfied(installedVersion: installed)
-            } else {
-                verification[request.packageID] = .stillOutdated(PackageInfo(
-                    id: request.packageID,
-                    name: request.name,
-                    currentVersion: installed,
-                    availableVersion: request.targetVersion))
-            }
+        let entries = (list.dependencies ?? [:]).compactMap { name, dependency in
+            dependency.version.map { InstalledInventory.Entry(id: name, version: $0) }
         }
-        return verification
+        return InstalledInventory.verify(requests, entries: entries)
     }
 
     func clearCache(

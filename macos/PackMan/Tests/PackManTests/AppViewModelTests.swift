@@ -259,7 +259,7 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(message.contains("cancelled"))
     }
 
-    func testClearAllCachesExecutesAndLogs() async throws {
+    func testClearAllCachesOpensPreviewWithoutMutation() async throws {
         let clearedCounter = Counter()
         let source1 = StubSource(
             id: .npm,
@@ -279,11 +279,12 @@ final class AppViewModelTests: XCTestCase {
         try await waitUntilIdle(viewModel)
 
         let clearedCount = await clearedCounter.value
-        XCTAssertEqual(clearedCount, 2)
-        XCTAssertTrue(viewModel.logEntries.contains { $0.message.contains("Cache cleared successfully") || $0.message.contains("Cache cleanup completed") })
+        XCTAssertEqual(clearedCount, 0)
+        XCTAssertTrue(viewModel.isCachePresented)
+        XCTAssertEqual(viewModel.selectedCacheSources, [.npm, .homebrew])
     }
 
-    func testClearCacheSingleExecutesForOneSource() async throws {
+    func testClearCacheSingleSelectsSourceWithoutMutation() async throws {
         let clearedCounter = Counter()
         let source1 = StubSource(
             id: .npm,
@@ -304,7 +305,8 @@ final class AppViewModelTests: XCTestCase {
         try await waitUntilIdle(viewModel)
 
         let clearedCount = await clearedCounter.value
-        XCTAssertEqual(clearedCount, 1)
+        XCTAssertEqual(clearedCount, 0)
+        XCTAssertEqual(viewModel.selectedCacheSources, [.npm])
     }
 
     func testSearchFilterMatchesPackageNameAndSource() async throws {

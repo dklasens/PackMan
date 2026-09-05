@@ -22,11 +22,14 @@ struct ProcessOutputEvent: Sendable, Equatable {
 enum ProcessError: LocalizedError, Equatable {
     case timedOut(executable: String, timeout: TimeInterval)
     case cancelled(executable: String)
+    case outputLimit(executable: String)
 
     var errorDescription: String? {
         switch self {
         case let .timedOut(executable, timeout):
             return "'\(URL(fileURLWithPath: executable).lastPathComponent)' timed out after \(Int(timeout))s."
+        case let .outputLimit(executable):
+            return "Output from \(executable) exceeded the 16 MB capture limit; the command was stopped."
         case let .cancelled(executable):
             return "'\(URL(fileURLWithPath: executable).lastPathComponent)' was cancelled."
         }
@@ -95,218 +98,116 @@ struct ProcessRunner: ProcessRunning {
 }
 
 private final class ProcessExecution: @unchecked Sendable {
-    private enum StopReason {
-        case cancelled
-        case timedOut
-    }
-
     private let executable: String
     private let arguments: [String]
     private let timeout: TimeInterval
     private let environment: [String: String]
     private let collector: ProcessOutputCollector
     private let lock = NSLock()
+    private var cancelled = false
 
-    private var process: Process?
-    private var ownsProcessGroup = false
-    private var stopReason: StopReason?
-    private var timeoutTask: Task<Void, Never>?
-    private var continuation: CheckedContinuation<ProcessResult, Error>?
-    private var didResume = false
-
-    init(
-        executable: String,
-        arguments: [String],
-        timeout: TimeInterval,
-        environment: [String: String],
-        onOutput: (@Sendable (ProcessOutputEvent) async -> Void)?
-    ) {
-        self.executable = executable
-        self.arguments = arguments
-        self.timeout = timeout
-        self.environment = environment
-        collector = ProcessOutputCollector(onOutput: onOutput)
+    init(executable: String, arguments: [String], timeout: TimeInterval, environment: [String: String],
+         onOutput: (@Sendable (ProcessOutputEvent) async -> Void)?) {
+        self.executable = executable; self.arguments = arguments; self.timeout = timeout
+        self.environment = environment; collector = ProcessOutputCollector(onOutput: onOutput)
     }
+
+    func cancel() { lock.withLock { cancelled = true } }
 
     func start() async throws -> ProcessResult {
-        try await withCheckedThrowingContinuation { continuation in
-            lock.lock()
-            self.continuation = continuation
-            lock.unlock()
-            launch()
+        // POSIX_SPAWN_SETPGROUP creates the group before exec, avoiding the race
+        // inherent in calling setpgid after Foundation.Process.run().
+        let outcome = await Task.detached { self.execute() }.value
+        let output = await collector.finish()
+        switch outcome {
+        case .success(let code): return ProcessResult(exitCode: code, stdout: output.stdout, stderr: output.stderr)
+        case .failure(let error): throw error
         }
     }
 
-    func cancel() {
-        requestStop(.cancelled)
-    }
-
-    private func launch() {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-
-        var mergedEnvironment = ProcessInfo.processInfo.environment
-        let inheritedPATH = mergedEnvironment["PATH"] ?? "/usr/bin:/bin"
-        mergedEnvironment["PATH"] = ProcessRunner.standardSearchPaths.joined(separator: ":") + ":" + inheritedPATH
-        for (key, value) in environment { mergedEnvironment[key] = value }
-        process.environment = mergedEnvironment
-
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        let stdoutReadQueue = DispatchQueue(label: "com.packman.process.stdout.\(UUID().uuidString)")
-        let stderrReadQueue = DispatchQueue(label: "com.packman.process.stderr.\(UUID().uuidString)")
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        stdoutPipe.fileHandleForReading.readabilityHandler = { [collector] handle in
-            stdoutReadQueue.async {
-                collector.append(handle.availableData, stream: .stdout)
+    private func execute() -> Result<Int32, Error> {
+        if lock.withLock({ cancelled }) { return .failure(ProcessError.cancelled(executable: executable)) }
+        var outFD: [Int32] = [0, 0], errFD: [Int32] = [0, 0]
+        guard pipe(&outFD) == 0 else { return .failure(POSIXError(.EMFILE)) }
+        guard pipe(&errFD) == 0 else { close(outFD[0]); close(outFD[1]); return .failure(POSIXError(.EMFILE)) }
+        for fd in outFD + errFD { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) }
+        var actions: posix_spawn_file_actions_t?
+        var attributes: posix_spawnattr_t?
+        posix_spawn_file_actions_init(&actions); posix_spawnattr_init(&attributes)
+        defer { posix_spawn_file_actions_destroy(&actions); posix_spawnattr_destroy(&attributes) }
+        posix_spawn_file_actions_adddup2(&actions, outFD[1], STDOUT_FILENO)
+        posix_spawn_file_actions_adddup2(&actions, errFD[1], STDERR_FILENO)
+        posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0)
+        for fd in outFD + errFD { posix_spawn_file_actions_addclose(&actions, fd) }
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP))
+        posix_spawnattr_setpgroup(&attributes, 0)
+        var merged = ProcessInfo.processInfo.environment
+        merged["PATH"] = ProcessRunner.standardSearchPaths.joined(separator: ":") + ":" + (merged["PATH"] ?? "")
+        merged.merge(environment, uniquingKeysWith: { _, new in new })
+        let argv = ([executable] + arguments).map { strdup($0) } + [nil]
+        let envp = merged.map { strdup("\($0.key)=\($0.value)") } + [nil]
+        defer { for pointer in argv + envp { free(pointer) } }
+        var pid: pid_t = 0
+        let launchCode = argv.withUnsafeBufferPointer { args in
+            envp.withUnsafeBufferPointer { env in
+                posix_spawn(&pid, executable, &actions, &attributes, args.baseAddress!, env.baseAddress!)
             }
         }
-        stderrPipe.fileHandleForReading.readabilityHandler = { [collector] handle in
-            stderrReadQueue.async {
-                collector.append(handle.availableData, stream: .stderr)
+        close(outFD[1]); close(errFD[1])
+        guard launchCode == 0 else {
+            close(outFD[0]); close(errFD[0])
+            return .failure(NSError(domain: NSPOSIXErrorDomain, code: Int(launchCode)))
+        }
+        _ = fcntl(outFD[0], F_SETFL, O_NONBLOCK); _ = fcntl(errFD[0], F_SETFL, O_NONBLOCK)
+        defer { close(outFD[0]); close(errFD[0]) }
+        var outOpen = true, errOpen = true, parentExited = false
+        var status: Int32 = 0
+        var stopError: Error?
+        var stopAt: TimeInterval?
+        var sentKill = false
+        let began = ProcessInfo.processInfo.systemUptime
+        var bytesRead = 0
+        var buffer = [UInt8](repeating: 0, count: 32 * 1024)
+        while true {
+            let now = ProcessInfo.processInfo.systemUptime
+            if stopError == nil {
+                if lock.withLock({ cancelled }) { stopError = ProcessError.cancelled(executable: executable) }
+                else if now - began >= timeout { stopError = ProcessError.timedOut(executable: executable, timeout: timeout) }
+                else if bytesRead > 16 * 1024 * 1024 { stopError = ProcessError.outputLimit(executable: executable) }
+                if stopError != nil { stopAt = now; _ = kill(-pid, SIGTERM) }
             }
-        }
-
-        process.terminationHandler = { [weak self] terminated in
-            guard let self else { return }
-            stdoutPipe.fileHandleForReading.readabilityHandler = nil
-            stderrPipe.fileHandleForReading.readabilityHandler = nil
-            stdoutReadQueue.sync {
-                self.collector.append(stdoutPipe.fileHandleForReading.readDataToEndOfFile(), stream: .stdout)
+            if let stopAt, now - stopAt >= 1, !sentKill {
+                _ = kill(-pid, SIGKILL)
+                sentKill = true
             }
-            stderrReadQueue.sync {
-                self.collector.append(stderrPipe.fileHandleForReading.readDataToEndOfFile(), stream: .stderr)
+            for (fd, stream) in [(outFD[0], ProcessOutputStream.stdout), (errFD[0], .stderr)] {
+                if (stream == .stdout && !outOpen) || (stream == .stderr && !errOpen) { continue }
+                // Limit each drain turn so a busy writer cannot starve cancellation.
+                for _ in 0..<16 {
+                    let count = read(fd, &buffer, buffer.count)
+                    if count > 0 {
+                        bytesRead += count
+                        if bytesRead <= 16 * 1024 * 1024 { collector.append(Data(buffer.prefix(count)), stream: stream) }
+                    } else {
+                        if count == 0 || (errno != EAGAIN && errno != EINTR) {
+                            if stream == .stdout { outOpen = false } else { errOpen = false }
+                        }
+                        break
+                    }
+                }
             }
-            self.complete(exitCode: terminated.terminationStatus)
-        }
-
-        lock.lock()
-        self.process = process
-        let shouldStop = stopReason != nil
-        lock.unlock()
-
-        do {
-            try process.run()
-            let pid = process.processIdentifier
-            let groupWasCreated = setpgid(pid, pid) == 0 || getpgid(pid) == pid
-            lock.lock()
-            ownsProcessGroup = groupWasCreated
-            lock.unlock()
-
-            scheduleTimeout()
-            if shouldStop { terminateProcess() }
-        } catch {
-            stdoutPipe.fileHandleForReading.readabilityHandler = nil
-            stderrPipe.fileHandleForReading.readabilityHandler = nil
-            Task { [collector] in
-                _ = await collector.finish()
-                self.resume(throwing: error)
+            if !parentExited {
+                let waited = waitpid(pid, &status, WNOHANG)
+                parentExited = waited == pid || (waited < 0 && errno == ECHILD)
             }
+            if parentExited && !outOpen && !errOpen { break }
+            // Escaped descendants must not keep inherited pipes alive forever.
+            if let stopAt, now - stopAt >= 2, parentExited { break }
+            usleep(10_000)
         }
-    }
-
-    private func scheduleTimeout() {
-        timeoutTask = Task { [weak self] in
-            guard let self else { return }
-            do {
-                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-            } catch {
-                return
-            }
-            requestStop(.timedOut)
-        }
-    }
-
-    private func requestStop(_ reason: StopReason) {
-        lock.lock()
-        if stopReason == nil { stopReason = reason }
-        let process = process
-        lock.unlock()
-
-        guard process != nil else { return }
-        terminateProcess()
-    }
-
-    private func terminateProcess() {
-        lock.lock()
-        guard let process else {
-            lock.unlock()
-            return
-        }
-        let pid = process.processIdentifier
-        let processGroup = ownsProcessGroup
-        lock.unlock()
-
-        if processGroup { _ = Darwin.kill(-pid, SIGTERM) }
-        if process.isRunning { process.terminate() }
-
-        Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: 2_000_000_000)
-            } catch {
-                return
-            }
-            guard let self else { return }
-            self.forceKillIfRunning()
-        }
-    }
-
-    private func forceKillIfRunning() {
-        lock.lock()
-        guard let process, process.isRunning else {
-            lock.unlock()
-            return
-        }
-        let pid = process.processIdentifier
-        let processGroup = ownsProcessGroup
-        lock.unlock()
-
-        if processGroup { _ = Darwin.kill(-pid, SIGKILL) }
-        _ = Darwin.kill(pid, SIGKILL)
-    }
-
-    private func complete(exitCode: Int32) {
-        timeoutTask?.cancel()
-        Task { [collector] in
-            let output = await collector.finish()
-            let reason = self.currentStopReason()
-
-            switch reason {
-            case .cancelled:
-                self.resume(throwing: ProcessError.cancelled(executable: self.executable))
-            case .timedOut:
-                self.resume(throwing: ProcessError.timedOut(executable: self.executable, timeout: self.timeout))
-            case nil:
-                self.resume(returning: ProcessResult(exitCode: exitCode, stdout: output.stdout, stderr: output.stderr))
-            }
-        }
-    }
-
-    private func resume(returning result: ProcessResult) {
-        takeContinuation()?.resume(returning: result)
-    }
-
-    private func resume(throwing error: Error) {
-        takeContinuation()?.resume(throwing: error)
-    }
-
-    private func takeContinuation() -> CheckedContinuation<ProcessResult, Error>? {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !didResume else { return nil }
-        didResume = true
-        let continuation = continuation
-        self.continuation = nil
-        return continuation
-    }
-
-    private func currentStopReason() -> StopReason? {
-        lock.lock()
-        defer { lock.unlock() }
-        return stopReason
+        if let stopError { return .failure(stopError) }
+        let signal = status & 0x7f
+        return .success(signal == 0 ? (status >> 8) & 0xff : 128 + signal)
     }
 }
 
@@ -319,10 +220,11 @@ private final class ProcessOutputCollector: @unchecked Sendable {
     private let continuation: AsyncStream<ProcessOutputEvent>.Continuation
     private let deliveryTask: Task<Void, Never>
     private var didFinish = false
+    private var droppedEvents = 0
 
     init(onOutput: (@Sendable (ProcessOutputEvent) async -> Void)?) {
         var streamContinuation: AsyncStream<ProcessOutputEvent>.Continuation!
-        let stream = AsyncStream<ProcessOutputEvent> { streamContinuation = $0 }
+        let stream = AsyncStream<ProcessOutputEvent>(bufferingPolicy: .bufferingNewest(1024)) { streamContinuation = $0 }
         continuation = streamContinuation
         deliveryTask = Task {
             for await event in stream {
@@ -364,6 +266,10 @@ private final class ProcessOutputCollector: @unchecked Sendable {
         if !didFinish {
             emitRemainder(stdoutRemainder, stream: .stdout)
             emitRemainder(stderrRemainder, stream: .stderr)
+            if droppedEvents > 0 {
+                continuation.yield(ProcessOutputEvent(stream: .stderr,
+                    line: "[Live output omitted at least \(droppedEvents) lines because the display could not keep up.]"))
+            }
             didFinish = true
             continuation.finish()
         }
@@ -373,17 +279,25 @@ private final class ProcessOutputCollector: @unchecked Sendable {
     }
 
     private func emitCompleteLines(from remainder: inout Data, stream: ProcessOutputStream) {
+        if remainder.count > 64 * 1024 && !remainder.contains(0x0A) {
+            emitRemainder(remainder, stream: stream)
+            remainder.removeAll(keepingCapacity: true)
+        }
         while let newline = remainder.firstIndex(of: 0x0A) {
             let lineData = remainder.subdata(in: remainder.startIndex..<newline)
             remainder.removeSubrange(remainder.startIndex...newline)
             if let line = String(data: lineData, encoding: .utf8) {
-                continuation.yield(ProcessOutputEvent(stream: stream, line: line))
+                emit(ProcessOutputEvent(stream: stream, line: line))
             }
         }
     }
 
+    private func emit(_ event: ProcessOutputEvent) {
+        if case .dropped = continuation.yield(event) { droppedEvents += 1 }
+    }
+
     private func emitRemainder(_ remainder: Data, stream: ProcessOutputStream) {
         guard !remainder.isEmpty, let line = String(data: remainder, encoding: .utf8) else { return }
-        continuation.yield(ProcessOutputEvent(stream: stream, line: line))
+        emit(ProcessOutputEvent(stream: stream, line: line))
     }
 }

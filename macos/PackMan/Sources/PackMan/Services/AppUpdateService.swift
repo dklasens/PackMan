@@ -66,11 +66,13 @@ final class AppUpdateService: AppUpdateChecking, @unchecked Sendable {
             .appendingPathComponent("PackMan", isDirectory: true)
             .appendingPathComponent("update-\(UUID().uuidString)", isDirectory: true)
         do {
-            try fileManager.createDirectory(at: stagingRoot, withIntermediateDirectories: true)
+            try fileManager.createDirectory(at: stagingRoot, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         } catch {
             throw AppUpdateError.invalidResponse
         }
 
+        var helperStarted = false
+        defer { if !helperStarted { try? fileManager.removeItem(at: stagingRoot) } }
         let zipURL = stagingRoot.appendingPathComponent(Self.zipAssetName)
         progress?("Downloading PackMan \(update.version)…")
         try await downloadFile(from: update.downloadURL, to: zipURL)
@@ -81,15 +83,18 @@ final class AppUpdateService: AppUpdateChecking, @unchecked Sendable {
         progress?("Extracting the update…")
         let stagedDirectory = stagingRoot.appendingPathComponent("staged", isDirectory: true)
         try fileManager.createDirectory(at: stagedDirectory, withIntermediateDirectories: true)
-        try UpdateApplier.extractZip(zipURL, to: stagedDirectory)
+        let extraction = try await ProcessRunner.shared.run("/usr/bin/ditto", ["-x", "-k", zipURL.path, stagedDirectory.path], timeout: 120)
+        guard extraction.succeeded else { throw AppUpdateError.missingApplication }
         guard let stagedApp = UpdateApplier.findPackManApp(in: stagedDirectory) else {
             throw AppUpdateError.missingApplication
         }
         guard let stagedVersion = UpdateApplier.shortVersion(of: stagedApp),
-              stagedVersion > currentVersion else {
+              stagedVersion > currentVersion, stagedVersion == AppVersion(update.version) else {
             throw AppUpdateError.missingApplication
         }
 
+        try await UpdateApplier.validateBundle(stagedApp)
+        try Task.checkCancellation()
         progress?("Closing PackMan to finish the update…")
         let request = UpdateApplyRequest(
             parentPID: ProcessInfo.processInfo.processIdentifier,
@@ -99,6 +104,7 @@ final class AppUpdateService: AppUpdateChecking, @unchecked Sendable {
         guard launchApplyHelper(request) else {
             throw AppUpdateError.helperFailed
         }
+        helperStarted = true
     }
 
     private func isNewer(_ candidate: AppUpdateInfo?) -> Bool {
@@ -154,7 +160,9 @@ final class AppUpdateService: AppUpdateChecking, @unchecked Sendable {
             }
             try data.write(to: destination, options: .atomic)
         } catch is CancellationError {
-            throw AppUpdateError.downloadTimedOut
+            throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
         } catch let error as URLError where error.code == .timedOut {
             throw AppUpdateError.downloadTimedOut
         }
@@ -272,11 +280,11 @@ enum UpdateApplier {
         let fileManager = FileManager.default
         let tempRoot = fileManager.temporaryDirectory
             .appendingPathComponent("PackMan", isDirectory: true)
-            .standardizedFileURL.path
-        let root = stagingRoot.standardizedFileURL.path
-        let staged = stagedApp.standardizedFileURL.path
-        let target = targetApp.standardizedFileURL.path
-        let own = ownBundle.standardizedFileURL.path
+            .resolvingSymlinksInPath().standardizedFileURL.path
+        let root = stagingRoot.resolvingSymlinksInPath().standardizedFileURL.path
+        let staged = stagedApp.resolvingSymlinksInPath().standardizedFileURL.path
+        let target = targetApp.resolvingSymlinksInPath().standardizedFileURL.path
+        let own = ownBundle.resolvingSymlinksInPath().standardizedFileURL.path
         return target == own
             && (root == tempRoot || root.hasPrefix(tempRoot + "/"))
             && staged.hasPrefix(root + "/")
@@ -303,54 +311,117 @@ enum UpdateApplier {
         process.waitUntilExit()
     }
 
-    static func launchHelper(_ request: UpdateApplyRequest) -> Bool {
-        guard isTrusted(
-            stagedApp: request.stagedApp,
-            targetApp: request.targetApp,
-            stagingRoot: request.stagingRoot,
-            ownBundle: request.targetApp
-        ) else { return false }
+    static let resultLogURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/PackMan/self-update.log")
 
-        let scriptURL = request.stagingRoot.appendingPathComponent("apply.sh")
-        let script = """
-        #!/bin/bash
-        set -eu
-        parent="$1"
-        staged="$2"
-        target="$3"
-        staging="$4"
-        i=0
-        while kill -0 "$parent" 2>/dev/null; do
-          i=$((i + 1))
-          if [ "$i" -gt 240 ]; then
-            break
+    static func validateBundle(_ app: URL) async throws {
+        let data = try Data(contentsOf: app.appendingPathComponent("Contents/Info.plist"))
+        guard let info = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              info["CFBundleIdentifier"] as? String == "com.packman.PackMan",
+              info["CFBundleExecutable"] as? String == "PackMan" else { throw AppUpdateError.missingApplication }
+        let binary = app.appendingPathComponent("Contents/MacOS/PackMan")
+        guard FileManager.default.isExecutableFile(atPath: binary.path),
+              binary.resolvingSymlinksInPath().path.hasPrefix(app.resolvingSymlinksInPath().path + "/") else {
+            throw AppUpdateError.missingApplication
+        }
+        #if arch(arm64)
+        let architecture = "arm64"
+        #else
+        let architecture = "x86_64"
+        #endif
+        let arch = try await ProcessRunner.shared.run("/usr/bin/lipo", [binary.path, "-verify_arch", architecture], timeout: 15)
+        let signature = try await ProcessRunner.shared.run("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path], timeout: 30)
+        guard arch.succeeded && signature.succeeded else { throw AppUpdateError.missingApplication }
+    }
+
+    /// Arguments are passed as argv, never interpolated into shell source.
+    /// The same transaction is exercised by integration tests with disposable bundles.
+    static let helperScript = #"""
+    #!/bin/bash
+    set -eu
+    umask 077
+    parent="$1"
+    staged="$2"
+    target="$3"
+    staging="$4"
+    log="$5"
+    max_wait="${6:-240}"
+    relaunch="${7:-1}"
+    move="${8:-/bin/mv}"
+    opener="${9:-/usr/bin/open}"
+    exec >>"$log" 2>&1
+    echo "Preparing PackMan update"
+    next="${target}.new-$(/usr/bin/uuidgen)"
+    backup="${target}.old-$(/usr/bin/uuidgen)"
+    moved=0
+    installed=0
+    recover() {
+      code=$?
+      if [ "$code" -ne 0 ]; then
+        echo "Update failed (exit $code)."
+        if [ "$moved" -eq 1 ]; then
+          if [ "$installed" -eq 1 ]; then /bin/rm -rf "$target"; fi
+          if "$move" "$backup" "$target"; then
+            echo "Previous PackMan restored. Reopen it manually."
+          else
+            echo "Recovery requires manually moving $backup to $target."
           fi
-          sleep 0.5
-        done
-        sleep 0.25
-        /bin/rm -rf "$target"
-        /usr/bin/ditto "$staged" "$target"
-        /usr/bin/xattr -dr com.apple.quarantine "$target" || true
-        /usr/bin/open "$target"
-        /bin/rm -rf "$staging"
-        """
+        else
+          echo "Previous PackMan was not changed."
+        fi
+      fi
+      /bin/rm -rf "$next"
+      exit "$code"
+    }
+    trap recover EXIT
+    i=0
+    while kill -0 "$parent" 2>/dev/null; do
+      i=$((i + 1))
+      if [ "$i" -gt "$max_wait" ]; then
+        echo "PackMan did not exit; replacement aborted."
+        exit 1
+      fi
+      sleep 0.5
+    done
+    /usr/bin/ditto "$staged" "$next"
+    /usr/bin/codesign --verify --deep --strict "$next"
+    "$move" "$target" "$backup"
+    moved=1
+    "$move" "$next" "$target"
+    installed=1
+    /usr/bin/xattr -dr com.apple.quarantine "$target" || true
+    if [ "$relaunch" -eq 1 ]; then
+      if ! "$opener" "$target"; then
+        echo "Updated successfully, but automatic restart failed. Reopen PackMan manually."
+        moved=0
+        /bin/rm -rf "$backup"
+        exit 0
+      fi
+    fi
+    echo "PackMan update completed successfully."
+    moved=0
+    /bin/rm -rf "$backup"
+    /bin/rm -rf "$staging"
+    """#
+
+    static func launchHelper(_ request: UpdateApplyRequest) -> Bool {
+        guard isTrusted(stagedApp: request.stagedApp, targetApp: request.targetApp,
+            stagingRoot: request.stagingRoot, ownBundle: request.targetApp) else { return false }
+        let scriptURL = request.stagingRoot.appendingPathComponent("apply.sh")
         do {
-            try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.createDirectory(at: resultLogURL.deletingLastPathComponent(), withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+            try Data().write(to: resultLogURL, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: resultLogURL.path)
+            try helperScript.write(to: scriptURL, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
             let process = Process()
             process.executableURL = scriptURL
-            process.arguments = [
-                String(request.parentPID),
-                request.stagedApp.path,
-                request.targetApp.path,
-                request.stagingRoot.path,
-            ]
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
+            process.arguments = [String(request.parentPID), request.stagedApp.path, request.targetApp.path,
+                request.stagingRoot.path, resultLogURL.path]
+            process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
             try process.run()
             return true
-        } catch {
-            return false
-        }
+        } catch { return false }
     }
 }

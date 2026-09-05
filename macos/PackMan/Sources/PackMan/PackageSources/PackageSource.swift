@@ -104,10 +104,12 @@ enum SourcePhase: String, Sendable {
 struct SourceScanReport: Sendable {
     var updates: [PackageInfo]
     var issues: [SourceIssue]
+    var skippedCount: Int
 
-    init(updates: [PackageInfo] = [], issues: [SourceIssue] = []) {
+    init(updates: [PackageInfo] = [], issues: [SourceIssue] = [], skippedCount: Int = 0) {
         self.updates = updates
         self.issues = issues
+        self.skippedCount = skippedCount
     }
 }
 
@@ -120,6 +122,24 @@ struct UpdateRequest: Sendable {
 enum UpdateVerification: Sendable {
     case satisfied(installedVersion: String?)
     case stillOutdated(PackageInfo)
+    case missing(String)
+    case inconclusive(installedVersion: String?, evidence: String)
+
+    var installedVersion: String? {
+        switch self {
+        case .satisfied(let version), .inconclusive(let version, _): return version
+        case .stillOutdated(let info): return info.currentVersion
+        case .missing: return nil
+        }
+    }
+
+    var evidence: String {
+        switch self {
+        case .satisfied(let version): return "Installed inventory reports \(version ?? "unknown")."
+        case .stillOutdated(let info): return "Installed inventory reports \(info.currentVersion); requested \(info.availableVersion)."
+        case .missing(let message), .inconclusive(_, let message): return message
+        }
+    }
 }
 
 enum SourceError: LocalizedError, Equatable {
@@ -190,18 +210,8 @@ extension PackageSource {
         requests: [UpdateRequest],
         context: ToolContext
     ) async throws -> [String: UpdateVerification] {
-        let report = try await scan(context: context) { _ in }
-        guard report.issues.isEmpty else {
-            throw SourceError.verificationFailed(report.issues.map(\.message).joined(separator: "; "))
-        }
-
-        let updates = Dictionary(uniqueKeysWithValues: report.updates.map { ($0.id, $0) })
-        return Dictionary(uniqueKeysWithValues: requests.map { request in
-            if let update = updates[request.packageID] {
-                return (request.packageID, .stillOutdated(update))
-            }
-            return (request.packageID, .satisfied(installedVersion: request.targetVersion))
-        })
+        Dictionary(requests.map { ($0.packageID, .inconclusive(installedVersion: nil,
+            evidence: "This source does not provide installed inventory verification.")) }, uniquingKeysWith: { first, _ in first })
     }
 
     func clearCache(

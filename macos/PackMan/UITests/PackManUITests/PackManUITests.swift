@@ -33,7 +33,7 @@ final class PackManUITests: XCTestCase {
         XCTAssertTrue(element("package-npm-alpha", in: app).waitForExistence(timeout: 3))
         XCTAssertTrue(element("scanIssueBanner", in: app).exists)
         XCTAssertFalse(app.staticTexts["System is Up to Date"].exists)
-        XCTAssertTrue(app.staticTexts["Alpha Tool"].exists)
+        XCTAssertEqual(element("package-npm-alpha", in: app).label, "Details for Alpha Tool")
     }
 
     func testCheckboxSelectionControlsUpdateAction() {
@@ -67,9 +67,84 @@ final class PackManUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["npm 12.0.0 • Custom"].exists)
     }
 
-    private func launch(_ scenario: String) -> XCUIApplication {
+    func testPackageDetailsAndVerificationOnlyRecovery() {
+        let app = launch("updates")
+        button("scanCancelButton", in: app).click()
+        let row = element("package-npm-alpha", in: app)
+        XCTAssertTrue(row.waitForExistence(timeout: 3))
+        row.click()
+        XCTAssertTrue(element("packageDetails", in: app).waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["/ui-test/npm"].firstMatch.exists)
+        button("verifyAgainButton", in: app).click()
+        XCTAssertTrue(app.staticTexts["Verified"].firstMatch.waitForExistence(timeout: 3))
+        XCTAssertTrue(element("verificationEvidence", in: app).exists)
+        button("Done", in: app).click()
+        button("historyButton", in: app).click()
+        XCTAssertTrue(element("updateHistory", in: app).waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "value CONTAINS 'Verified' OR label CONTAINS 'Verified'")).firstMatch.exists)
+    }
+
+    func testHistoryAndRedactedDiagnosticPreview() {
+        let app = launch("updates")
+        button("scanCancelButton", in: app).click()
+        XCTAssertTrue(button("Update 2", in: app).waitForExistence(timeout: 3))
+        button("Update 2", in: app).click()
+        XCTAssertTrue(app.staticTexts["Updates Completed"].firstMatch.waitForExistence(timeout: 4))
+        button("historyButton", in: app).click()
+        XCTAssertTrue(element("updateHistory", in: app).waitForExistence(timeout: 2))
+        button("Export redacted diagnostics", in: app).click()
+        XCTAssertTrue(app.staticTexts["Review diagnostic export"].firstMatch.waitForExistence(timeout: 2))
+        XCTAssertTrue(button("Save JSON…", in: app).exists)
+    }
+
+    func testCachePreviewFromSourcesShowsConfiguredLocationAndSize() {
+        let app = launch("updates")
+        button("sourcesButton", in: app).click()
+        button("Package Caches…", in: app).click()
+        XCTAssertTrue(element("packageCaches", in: app).waitForExistence(timeout: 2))
+        button("previewCachesButton", in: app).click()
+        XCTAssertTrue(app.staticTexts["/ui-test/cache"].firstMatch.waitForExistence(timeout: 3))
+        XCTAssertTrue(element("cacheSize-npm", in: app).exists)
+    }
+
+    func testQuitWaitsForCancellationAndCanKeepWorking() {
+        let app = launch("quitScan")
+        app.typeKey("r", modifierFlags: .command)
+        XCTAssertTrue(element("sourceProgress", in: app).waitForExistence(timeout: 2))
+        app.typeKey("q", modifierFlags: .command)
+        XCTAssertTrue(button("Keep Working", in: app).waitForExistence(timeout: 2))
+        button("Keep Working", in: app).click()
+        XCTAssertTrue(element("sourceProgress", in: app).exists)
+        app.typeKey("q", modifierFlags: .command)
+        button("Cancel and Quit", in: app).click()
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 5))
+    }
+
+    func testManualAppStoreDetailsAndVerificationInDarkMode() {
+        let app = launch("manual", dark: true)
+        app.typeKey("r", modifierFlags: .command)
+        XCTAssertTrue(element("package-appStore-123456", in: app).waitForExistence(timeout: 3))
+        XCTAssertFalse(button("updateSelectedButton", in: app).isEnabled)
+        app.typeKey("i", modifierFlags: .command)
+        XCTAssertTrue(button("Update in App Store", in: app).waitForExistence(timeout: 2))
+        XCTAssertTrue(button("Copy Terminal Command", in: app).exists)
+        XCTAssertFalse(button("Update / retry install", in: app).exists)
+        button("verifyAgainButton", in: app).click()
+        XCTAssertTrue(app.staticTexts["Verified"].firstMatch.waitForExistence(timeout: 3))
+    }
+
+    override func tearDownWithError() throws {
+        guard XCUIApplication().state != .notRunning else { return }
+        let screenshot = XCTAttachment(screenshot: XCUIApplication().windows.firstMatch.screenshot())
+        screenshot.name = name
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+    }
+
+    private func launch(_ scenario: String, dark: Bool = false) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["--ui-test-scenario", scenario]
+        app.launchArguments += ["-AppleInterfaceStyle", dark ? "Dark" : "Light"]
         app.launch()
         return app
     }

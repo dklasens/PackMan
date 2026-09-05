@@ -10,17 +10,23 @@ struct BrewSource: PackageSource {
     let runner: any ProcessRunning
     let resolver: any ToolResolving
     let refresh: BrewRefreshing
+    let inventory: BrewInventory?
+    let settings: any SettingsStoring
 
     init(
         kind: BrewKind,
         runner: any ProcessRunning = ProcessRunner.shared,
         resolver: any ToolResolving = ToolResolver.shared,
-        refresh: BrewRefreshing = BrewRefresh.shared
+        refresh: BrewRefreshing = BrewRefresh.shared,
+        inventory: BrewInventory? = nil,
+        settings: any SettingsStoring = SettingsStore.shared
     ) {
         self.kind = kind
         self.runner = runner
         self.resolver = resolver
         self.refresh = refresh
+        self.inventory = inventory
+        self.settings = settings
     }
 
     var descriptor: SourceDescriptor {
@@ -63,13 +69,15 @@ struct BrewSource: PackageSource {
 
         try Task.checkCancellation()
         await progress(.scanning)
-        let result = try await runner.run(
-            context.executablePath,
-            ["outdated", "--json=v2"],
-            timeout: 300,
-            environment: SourceSupport.environment(
-                pathEntries: context.pathEntries,
-                additions: ["HOMEBREW_NO_AUTO_UPDATE": "1"]))
+        let greedy = settings.includesSelfUpdatingCasks()
+        let result: ProcessResult
+        if let inventory {
+            result = try await inventory.outdated(context: context, runner: runner, greedy: greedy)
+        } else {
+            result = try await runner.run(context.executablePath,
+                ["outdated", "--json=v2"] + (greedy ? ["--greedy-auto-updates"] : []), timeout: 300,
+                environment: SourceSupport.environment(pathEntries: context.pathEntries, additions: ["HOMEBREW_NO_AUTO_UPDATE": "1"]))
+        }
         guard result.succeeded else { throw SourceSupport.commandFailure("brew outdated", result: result) }
         guard let data = result.stdout.data(using: .utf8) else {
             throw SourceError.commandFailed("brew outdated returned non-UTF-8 output.")
@@ -97,12 +105,12 @@ struct BrewSource: PackageSource {
             .filter { !($0.pinned ?? false) && PackageIdValidator.isValid($0.name) }
             .map {
                 PackageInfo(
-                    id: $0.name,
+                    id: $0.fullToken ?? $0.fullName ?? $0.name,
                     name: $0.name,
                     currentVersion: $0.installedVersions.last ?? "",
                     availableVersion: $0.currentVersion)
             }
-        return SourceScanReport(updates: updates, issues: issues)
+        return SourceScanReport(updates: updates, issues: issues, skippedCount: entries.filter { $0.pinned == true }.count)
     }
 
     func update(
@@ -114,7 +122,8 @@ struct BrewSource: PackageSource {
             throw SourceError.invalidPackageId(request.packageID)
         }
         var arguments = ["upgrade"]
-        if kind == .cask { arguments.append("--cask") }
+        arguments.append(kind == .cask ? "--cask" : "--formula")
+        if kind == .cask && settings.includesSelfUpdatingCasks() { arguments.append("--greedy-auto-updates") }
         arguments.append(request.packageID)
 
         let result = try await runner.run(
@@ -134,7 +143,6 @@ struct BrewSource: PackageSource {
     ) async throws -> Int64 {
         let homebrewCacheURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/Homebrew")
         let sizeBefore = SourceSupport.directorySize(at: homebrewCacheURL)
-        var outputLines: [String] = []
 
         let result = try await runner.run(
             context.executablePath,
@@ -143,18 +151,13 @@ struct BrewSource: PackageSource {
             environment: SourceSupport.environment(
                 pathEntries: context.pathEntries,
                 additions: ["HOMEBREW_NO_AUTO_UPDATE": "1"]),
-            onOutput: { event in
-                if event.stream == .stdout {
-                    outputLines.append(event.line)
-                }
-                await onOutput(event)
-            })
+            onOutput: onOutput)
         guard result.succeeded else { throw SourceSupport.commandFailure("brew cleanup", result: result) }
 
         let sizeAfter = SourceSupport.directorySize(at: homebrewCacheURL)
         let delta = max(0, sizeBefore - sizeAfter)
         if delta > 0 { return delta }
-        return parseFreedBytes(from: outputLines)
+        return parseFreedBytes(from: result.stdout.components(separatedBy: .newlines))
     }
 
     private func parseFreedBytes(from lines: [String]) -> Int64 {
@@ -190,15 +193,16 @@ protocol BrewRefreshing: Sendable {
 actor BrewRefresh: BrewRefreshing {
     static let shared = BrewRefresh()
 
-    private var lastSuccessfulRefresh: Date?
-    private var inFlight: Task<Void, Error>?
+    private var lastSuccessfulRefresh: [String: Date] = [:]
+    private var inFlight: [String: Task<Void, Error>] = [:]
     private let interval: TimeInterval = 3600
 
+    func invalidate() { lastSuccessfulRefresh.removeAll() }
+
     func refreshIfNeeded(context: ToolContext, runner: any ProcessRunning) async throws {
-        if let lastSuccessfulRefresh, Date().timeIntervalSince(lastSuccessfulRefresh) < interval { return }
-        if let inFlight {
-            return try await inFlight.value
-        }
+        let key = context.installationKey
+        if let date = lastSuccessfulRefresh[key], Date().timeIntervalSince(date) < interval { return }
+        if let task = inFlight[key] { return try await task.value }
 
         let task = Task {
             let result = try await runner.run(
@@ -210,17 +214,17 @@ actor BrewRefresh: BrewRefreshing {
                     additions: ["HOMEBREW_NO_AUTO_UPDATE": "1"]))
             guard result.succeeded else { throw SourceSupport.commandFailure("brew update", result: result) }
         }
-        inFlight = task
+        inFlight[key] = task
         do {
             try await withTaskCancellationHandler {
                 try await task.value
             } onCancel: {
                 task.cancel()
             }
-            lastSuccessfulRefresh = .now
-            inFlight = nil
+            lastSuccessfulRefresh[key] = .now
+            inFlight[key] = nil
         } catch {
-            inFlight = nil
+            inFlight[key] = nil
             throw error
         }
     }
@@ -235,5 +239,40 @@ struct BrewOutdated: Decodable {
         let installedVersions: [String]
         let currentVersion: String
         let pinned: Bool?
+        let fullName: String?
+        let fullToken: String?
+    }
+}
+
+
+extension ToolContext {
+    var installationKey: String {
+        URL(fileURLWithPath: executablePath).resolvingSymlinksInPath().path + "|" + version + "|" + pathEntries.joined(separator: ":")
+    }
+}
+
+actor BrewInventory {
+    private var tasks: [String: Task<ProcessResult, Error>] = [:]
+    func beginScan() { tasks.removeAll() }
+    func outdated(context: ToolContext, runner: any ProcessRunning, greedy: Bool) async throws -> ProcessResult {
+        let key = context.installationKey + "|\(greedy)"
+        let task: Task<ProcessResult, Error>
+        if let existing = tasks[key] { task = existing }
+        else {
+            task = Task {
+                if greedy {
+                    let help = try await runner.run(context.executablePath, ["outdated", "--help"], timeout: 15,
+                        environment: SourceSupport.environment(pathEntries: context.pathEntries))
+                    guard help.succeeded && help.stdout.contains("--greedy-auto-updates") else {
+                        throw SourceError.commandFailed("This Homebrew does not support checking self-updating casks. Upgrade Homebrew or turn off that setting.")
+                    }
+                }
+                return try await runner.run(context.executablePath,
+                    ["outdated", "--json=v2"] + (greedy ? ["--greedy-auto-updates"] : []), timeout: 300,
+                    environment: SourceSupport.environment(pathEntries: context.pathEntries, additions: ["HOMEBREW_NO_AUTO_UPDATE": "1"]))
+            }
+            tasks[key] = task
+        }
+        return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
     }
 }

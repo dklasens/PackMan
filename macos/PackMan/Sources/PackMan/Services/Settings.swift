@@ -2,6 +2,10 @@ import Foundation
 
 protocol SettingsStoring: Sendable {
     var loadIssue: String? { get }
+    func hasCompletedSourceSetup() -> Bool
+    func setSourceSetupCompleted() throws
+    func includesSelfUpdatingCasks() -> Bool
+    func setIncludesSelfUpdatingCasks(_ value: Bool) throws
 
     func isSourceEnabled(_ id: SourceID) -> Bool
     func setSource(_ id: SourceID, enabled: Bool) throws
@@ -31,6 +35,8 @@ final class SettingsStore: SettingsStoring, @unchecked Sendable {
         var lastAppUpdateCheck: Date?
         var skippedAppUpdateVersion: String?
         var availableAppUpdate: StoredAppUpdate?
+        var sourceSetupCompleted: Bool?
+        var includeSelfUpdatingCasks: Bool?
     }
 
     private struct StoredAppUpdate: Codable {
@@ -64,12 +70,16 @@ final class SettingsStore: SettingsStoring, @unchecked Sendable {
         let version: String
         let pathEntries: [String]
         let origin: ToolResolutionOrigin
+        var checkedAt: Date?
+        var fingerprint: String?
 
         init(_ context: ToolContext) {
             executablePath = context.executablePath
             version = context.version
             pathEntries = context.pathEntries
             origin = context.origin
+            checkedAt = .now
+            fingerprint = SettingsStore.fingerprint(context)
         }
 
         var context: ToolContext {
@@ -100,6 +110,11 @@ final class SettingsStore: SettingsStoring, @unchecked Sendable {
             ignoredUpdates: [])
         loadFromDisk()
     }
+
+    func hasCompletedSourceSetup() -> Bool { lock.withLock { data.sourceSetupCompleted ?? false } }
+    func setSourceSetupCompleted() throws { try lock.withLock { data.sourceSetupCompleted = true; try saveLocked() } }
+    func includesSelfUpdatingCasks() -> Bool { lock.withLock { data.includeSelfUpdatingCasks ?? false } }
+    func setIncludesSelfUpdatingCasks(_ value: Bool) throws { try lock.withLock { data.includeSelfUpdatingCasks = value; try saveLocked() } }
 
     func isSourceEnabled(_ id: SourceID) -> Bool {
         lock.withLock { !data.disabledSources.contains(id.rawValue) }
@@ -135,11 +150,21 @@ final class SettingsStore: SettingsStoring, @unchecked Sendable {
     func cachedContext(for sourceID: SourceID) -> ToolContext? {
         lock.withLock {
             guard let cached = data.cachedContexts?[sourceID.rawValue],
-                  FileManager.default.isExecutableFile(atPath: cached.executablePath) else {
+                  FileManager.default.isExecutableFile(atPath: cached.executablePath),
+                  let checkedAt = cached.checkedAt, Date.now.timeIntervalSince(checkedAt) < 300,
+                  cached.fingerprint == Self.fingerprint(cached.context) else {
                 return nil
             }
             return cached.context
         }
+    }
+
+    private static func fingerprint(_ context: ToolContext) -> String {
+        ([context.executablePath] + context.pathEntries.map { URL(fileURLWithPath: $0).appendingPathComponent("node").path }).map { path in
+            let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+            let attrs = (try? FileManager.default.attributesOfItem(atPath: url.path)) ?? [:]
+            return "\(url.path)|\(attrs[.modificationDate] ?? "")|\(attrs[.size] ?? "")|\(attrs[.systemFileNumber] ?? "")"
+        }.joined(separator: "\n")
     }
 
     func setCachedContext(_ context: ToolContext?, for sourceID: SourceID) throws {
@@ -209,6 +234,7 @@ final class SettingsStore: SettingsStoring, @unchecked Sendable {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             if var current = try? decoder.decode(SettingsData.self, from: raw), current.version >= 2 {
+                current.sourceSetupCompleted = current.sourceSetupCompleted ?? true
                 current.version = 4
                 current.cachedContexts = current.cachedContexts ?? [:]
                 current.ignoredUpdates = current.ignoredUpdates ?? []
@@ -216,6 +242,7 @@ final class SettingsStore: SettingsStoring, @unchecked Sendable {
                 return
             }
             if let legacy = try? decoder.decode(LegacySettingsData.self, from: raw) {
+                data.sourceSetupCompleted = true
                 data.disabledSources = (legacy.disabledSources ?? []).compactMap(Self.legacySourceID).map(\.rawValue)
                 return
             }
@@ -274,4 +301,12 @@ private extension NSLock {
         defer { unlock() }
         return try body()
     }
+}
+
+
+extension SettingsStoring {
+    func hasCompletedSourceSetup() -> Bool { true }
+    func setSourceSetupCompleted() throws {}
+    func includesSelfUpdatingCasks() -> Bool { false }
+    func setIncludesSelfUpdatingCasks(_ value: Bool) throws {}
 }

@@ -10,6 +10,7 @@ final class SourceOption: Identifiable {
     var scanState: SourceScanState
     var toolContext: ToolContext?
     var probeIssue: SourceIssue?
+    var environmentDescription: String?
 
     nonisolated var id: SourceID { source.id }
     var name: String { source.name }
@@ -65,6 +66,28 @@ final class AppViewModel {
         PackageSortComparator(field: .name),
     ]
     var searchText = ""
+    var sourceFilter: SourceID?
+    var statusFilter: PackageStatusFilter = .all
+    var detailPackage: PackageUpdate?
+    var isHistoryPresented = false
+    var isCachePresented = false
+    var selectedCacheSources = Set<SourceID>()
+    var cachePreviews: [CachePreview] = []
+    var cacheResults: [SourceID: String] = [:]
+    var includeNugetGlobalPackages = false
+    var confirmCacheCleanup: ([CachePreview]) -> Bool = AppViewModel.confirmCacheAlert
+    @ObservationIgnored private let cacheInspector: any CacheInspecting
+    var history: [UpdateHistoryEntry] = []
+    var diagnosticsPreview: String?
+    var lastScanDate: Date?
+    var sourceSetupSuggested = false
+    var includeSelfUpdatingCasks = false
+    var hasProbedSources = false
+    @ObservationIgnored private let brewInventory = BrewInventory()
+    @ObservationIgnored private var forceMetadataRefresh = false
+    var ignoredCounts: [SourceID: Int] = [:]
+    var skippedCounts: [SourceID: Int] = [:]
+    @ObservationIgnored private let historyStore: any UpdateHistoryStoring
     var isLogVisible = false
     var availableUpdate: AppUpdateInfo?
     var confirmAppUpdate: (String) -> Bool = AppViewModel.confirmInstallAlert
@@ -86,13 +109,18 @@ final class AppViewModel {
     init(
         sources: [any PackageSource]? = nil,
         settings: any SettingsStoring = SettingsStore.shared,
-        updater: (any AppUpdateChecking)? = nil
+        updater: (any AppUpdateChecking)? = nil,
+        historyStore: (any UpdateHistoryStoring)? = nil,
+        cacheInspector: any CacheInspecting = CacheInspector()
     ) {
         self.settings = settings
+        self.cacheInspector = cacheInspector
+        self.historyStore = historyStore ?? UpdateHistoryStore(url: sources == nil ? UpdateHistoryStore.defaultURL : nil)
+        self.history = self.historyStore.read()
         self.updater = updater ?? AppUpdateService(settings: settings)
         let configuredSources = sources ?? [
-            BrewSource(kind: .formula),
-            BrewSource(kind: .cask),
+            BrewSource(kind: .formula, inventory: brewInventory, settings: settings),
+            BrewSource(kind: .cask, inventory: brewInventory, settings: settings),
             MasSource(),
             NpmSource(),
             PipSource(),
@@ -103,30 +131,36 @@ final class AppViewModel {
             SourceOption(source: $0, isEnabled: settings.isSourceEnabled($0.id))
         }
         ignoredUpdates = settings.ignoredUpdateKeys().sorted()
+        sourceSetupSuggested = !settings.hasCompletedSourceSetup()
+        includeSelfUpdatingCasks = settings.includesSelfUpdatingCasks()
+        if let issue = self.historyStore.loadIssue { appendLog(issue, level: .warning) }
         if let issue = settings.loadIssue {
             appendLog(issue, level: .warning)
         }
     }
 
-    var isBusy: Bool { operation.isBusy }
+    var isBusy: Bool { operation.isBusy || activeTask != nil }
     var enabledSourceCount: Int { sourceOptions.filter(\.isEnabled).count }
 
     var filteredPackages: [PackageUpdate] {
-        guard !searchText.trimmed.isEmpty else { return packages }
         let query = searchText.trimmed.lowercased()
         return packages.filter { package in
-            package.name.lowercased().contains(query) ||
-            package.packageID.lowercased().contains(query) ||
-            package.source.lowercased().contains(query) ||
-            package.currentVersion.lowercased().contains(query) ||
-            package.availableVersion.lowercased().contains(query)
+            (sourceFilter == nil || package.sourceID == sourceFilter) && statusFilter.matches(package) &&
+            (query.isEmpty || [package.name, package.packageID, package.source, package.currentVersion, package.availableVersion]
+                .contains { $0.lowercased().contains(query) })
         }
     }
 
-    var actionablePackages: [PackageUpdate] { filteredPackages.filter(\.isActionable) }
-    var selectedPackages: [PackageUpdate] { actionablePackages.filter(\.isSelected) }
+    var actionablePackages: [PackageUpdate] { packages.filter(\.isActionable) }
+    var visibleActionablePackages: [PackageUpdate] { filteredPackages.filter(\.isActionable) }
+    var selectedPackages: [PackageUpdate] { visibleActionablePackages.filter(\.isSelected) }
     var selectedCount: Int { selectedPackages.count }
+    var totalSelectedCount: Int { actionablePackages.filter(\.isSelected).count }
     var updateCount: Int { actionablePackages.count }
+    var manualCount: Int { packages.filter(\.isManual).count }
+    var ignoredCount: Int { ignoredCounts.values.reduce(0, +) }
+    var skippedCount: Int { skippedCounts.values.reduce(0, +) }
+    var detectedCount: Int { packages.count + ignoredCount }
     var canUpdate: Bool { !isBusy && selectedCount > 0 }
     var issueSources: [SourceOption] { sourceOptions.filter { $0.isEnabled && $0.scanState.hasIssue } }
     var hasIgnoredUpdates: Bool { !ignoredUpdates.isEmpty }
@@ -151,7 +185,7 @@ final class AppViewModel {
              .completedWithIssues(_, _, let date), .allUnavailable(let date), .cancelled(let date):
             return date
         default:
-            return nil
+            return lastScanDate
         }
     }
 
@@ -182,6 +216,8 @@ final class AppViewModel {
 
         if let updateSummary, updateSummary.total > 0 {
             var parts: [String] = []
+            if updateSummary.verified > 0 { parts.append("\(updateSummary.verified) verified") }
+            if updateSummary.notStarted > 0 { parts.append("\(updateSummary.notStarted) not started") }
             if updateSummary.updated > 0 { parts.append(Self.count(updateSummary.updated, singular: "updated package", plural: "updated packages")) }
             if updateSummary.failed > 0 { parts.append(Self.count(updateSummary.failed, singular: "failure", plural: "failures")) }
             if updateSummary.verificationFailed > 0 { parts.append(Self.count(updateSummary.verificationFailed, singular: "verification issue", plural: "verification issues")) }
@@ -194,7 +230,7 @@ final class AppViewModel {
         case .running: return "Scanning…"
         case .updatesAvailable(let count): return Self.count(count, singular: "update available", plural: "updates available").capitalized + "."
         case .updatesCompleted: return "Selected updates completed."
-        case .upToDate: return "System is up to date."
+        case .upToDate: return detectedCount > 0 ? "No automatic updates pending; \(ignoredCount) ignored, \(manualCount) manual." : "No updates found in the sources checked."
         case .completedWithIssues(let updates, let issues, _):
             return "Scan completed with \(Self.count(issues, singular: "issue", plural: "issues")) and \(Self.count(updates, singular: "update", plural: "updates"))."
         case .allUnavailable: return "No enabled sources could be scanned."
@@ -204,8 +240,7 @@ final class AppViewModel {
     }
 
     var footerText: String {
-        guard updateCount > 0 else { return "No actionable updates" }
-        return "\(selectedCount) selected of \(updateCount)"
+        "\(selectedCount) visible selected · \(totalSelectedCount) selected total · \(updateCount) automatic · \(manualCount) manual · \(ignoredCount) ignored · \(skippedCount) skipped"
     }
 
     func startScan() {
@@ -247,24 +282,151 @@ final class AppViewModel {
     }
 
     func startClearAllCaches() {
-        guard activeTask == nil else { return }
-        let enabledOptions = sourceOptions.filter(\.isEnabled)
-        guard !enabledOptions.isEmpty else { return }
-        activeTask = Task { [weak self] in
-            await self?.runClearCaches(options: enabledOptions)
-        }
-        startedOperations += 1
+        guard !isBusy else { return }
+        selectedCacheSources = Set(sourceOptions.filter { $0.isEnabled && $0.id != .appStore }.map(\.id))
+        cachePreviews = []; cacheResults = [:]; isCachePresented = true
     }
 
     func startClearCacheSingle(_ option: SourceOption) {
-        guard activeTask == nil, option.isEnabled else { return }
+        guard !isBusy else { return }
+        selectedCacheSources = [option.id]
+        cachePreviews = []; cacheResults = [:]; isCachePresented = true
+    }
+
+    func startCachePreview(clearAfterConfirmation: Bool = false) {
+        guard !isBusy, !selectedCacheSources.isEmpty else { return }
+        let ids = selectedCacheSources
+        let includeGlobal = includeNugetGlobalPackages
         activeTask = Task { [weak self] in
-            await self?.runClearCaches(options: [option])
+            await self?.runCachePreview(ids: ids, includeGlobal: includeGlobal, clearAfterConfirmation: clearAfterConfirmation)
         }
         startedOperations += 1
     }
 
+    private func runCachePreview(ids: Set<SourceID>, includeGlobal: Bool, clearAfterConfirmation: Bool) async {
+        operation = .clearingCache(current: "Preview", completed: 0, total: ids.count)
+        defer { operation = .idle; activeTask = nil; completedOperations += 1 }
+        cachePreviews = []; cacheResults = [:]
+        var shared: [String: CachePreview] = [:]
+        for option in sourceOptions where ids.contains(option.id) {
+            if Task.isCancelled { return }
+            do {
+                guard case .available(let context) = await option.source.probe() else {
+                    throw SourceError.commandFailed("Manager unavailable. Recheck availability in Sources.")
+                }
+                let key = option.descriptor.toolID.rawValue + "|" + context.installationKey
+                var preview: CachePreview
+                if let existing = shared[key] {
+                    preview = existing; preview.sourceID = option.id; preview.sourceName = option.name
+                    preview.scope += " Shared with another selected source; cleaned once."
+                } else {
+                    preview = try await cacheInspector.preview(source: option.source, context: context, includeGlobalPackages: includeGlobal)
+                    shared[key] = preview
+                }
+                cachePreviews.append(preview)
+            } catch {
+                if Task.isCancelled { return }
+                cachePreviews.append(CachePreview(sourceID: option.id, sourceName: option.name,
+                    scope: CacheInspector.scope(option.id, includeGlobalPackages: includeGlobal), issue: error.userMessage))
+            }
+        }
+        guard clearAfterConfirmation, !Task.isCancelled else { return }
+        let available = cachePreviews.filter { $0.supported && $0.issue == nil }
+        guard !available.isEmpty, confirmCacheCleanup(cachePreviews), !Task.isCancelled else { return }
+        var resultsByTool: [String: String] = [:]
+        for preview in cachePreviews {
+            if Task.isCancelled { cacheResults[preview.id] = "Not started — cancelled"; continue }
+            guard preview.supported, preview.issue == nil, let context = preview.context else {
+                cacheResults[preview.id] = preview.issue ?? "Managed by macOS"; continue
+            }
+            let tool = sourceOptions.first { $0.id == preview.id }!.descriptor.toolID
+            let key = tool.rawValue + "|" + context.installationKey
+            if let result = resultsByTool[key] { cacheResults[preview.id] = "Shared cleanup: " + result; continue }
+            operation = .clearingCache(current: preview.sourceName, completed: cacheResults.count, total: cachePreviews.count)
+            let message: String
+            do {
+                try await cacheInspector.clear(preview, includeGlobalPackages: includeGlobal) { [weak self] event in
+                    await self?.appendOutput(commandID: "cache-\(preview.id.rawValue)", scope: preview.sourceName, event: event)
+                }
+                let after = try await CacheInspector.measure(preview.paths)
+                if let before = preview.bytes, preview.measurementComplete && after.complete {
+                    message = "Cleared; measured cache reduction \(SourceSupport.formatBytes(max(0, before - after.bytes)))."
+                } else { message = "Cleanup completed; space reclaimed was not fully measurable." }
+            } catch {
+                message = Task.isCancelled ? "Cancelled; some files may already have been removed." : "Failed: \(error.userMessage)"
+            }
+            resultsByTool[key] = message; cacheResults[preview.id] = message
+            appendLog("\(preview.sourceName): \(message)")
+        }
+    }
+
+    private static func confirmCacheAlert(_ previews: [CachePreview]) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Clear the selected caches?"
+        alert.informativeText = previews.map { "\($0.sourceName): \($0.issue ?? $0.scope)\n\($0.paths.joined(separator: "\n"))\n\($0.sizeText)" }.joined(separator: "\n\n")
+        alert.addButton(withTitle: "Clear Selected"); alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    func refreshMetadataAndScan() {
+        guard !isBusy else { return }
+        forceMetadataRefresh = true
+        startScan()
+    }
+
+    func setCaskPolicy(_ enabled: Bool) {
+        guard !isBusy else { return }
+        do {
+            try settings.setIncludesSelfUpdatingCasks(enabled)
+            includeSelfUpdatingCasks = enabled
+            packages.removeAll { $0.sourceID == .homebrewCasks }
+            scanSummary = .notStarted
+        } catch { appendLog("Could not save cask policy: \(error.userMessage)", level: .error) }
+    }
+
+    func recheckSources() {
+        guard !isBusy else { return }
+        activeTask = Task { [weak self] in await self?.probeSources() }
+        startedOperations += 1
+    }
+
+    private func probeSources() async {
+        operation = .scanning(completed: 0, total: sourceOptions.count)
+        defer { operation = .idle; activeTask = nil; completedOperations += 1 }
+        for option in sourceOptions {
+            if Task.isCancelled { break }
+            try? settings.setCachedContext(nil, for: option.id)
+            switch await option.source.probe() {
+            case .available(let context):
+                option.toolContext = context; option.probeIssue = nil
+                option.scanState = option.isEnabled ? .notScanned : .disabled
+                try? settings.setCachedContext(context, for: option.id)
+                option.environmentDescription = await SourceEnvironmentInspector.describe(option.id, context: context)
+            case .unavailable(let issue):
+                option.toolContext = nil; option.probeIssue = issue
+                option.scanState = option.isEnabled ? .unavailable(issue, completedAt: .now) : .disabled
+            }
+        }
+        hasProbedSources = !Task.isCancelled
+    }
+
+    func useDetectedSources() {
+        guard !isBusy, hasProbedSources else { return }
+        for option in sourceOptions { setSourceEnabled(option, enabled: option.toolContext != nil) }
+        hasProbedSources = false
+        finishSourceSetup()
+    }
+
+    func finishSourceSetup() {
+        do { try settings.setSourceSetupCompleted(); sourceSetupSuggested = false }
+        catch { appendLog("Could not save source setup: \(error.userMessage)", level: .error) }
+    }
+
     func beginStartupUpdateCheck() {
+        if sourceSetupSuggested { isSourcesSheetPresented = true; recheckSources() }
+        if let notice = try? String(contentsOf: UpdateApplier.resultLogURL, encoding: .utf8), !notice.isEmpty {
+            appendLog("Previous self-update: " + notice, level: notice.contains("failed") || notice.contains("aborted") ? .warning : .info)
+        }
         Task { await checkForAppUpdates(force: false) }
     }
 
@@ -299,88 +461,6 @@ final class AppViewModel {
         availableUpdate = nil
     }
 
-    private func runClearCaches(options: [SourceOption]) async {
-        isLogVisible = true
-        appendLog("Cache cleanup started (\(options.map(\.name).joined(separator: ", "))).")
-        operation = .clearingCache(current: nil, completed: 0, total: options.count)
-
-        var completed = 0
-        var succeededCount = 0
-        var failedCount = 0
-        var totalBytesFreed: Int64 = 0
-        var processedToolIDs = Set<ToolID>()
-
-        for option in options {
-            if Task.isCancelled { break }
-            operation = .clearingCache(current: option.name, completed: completed, total: options.count)
-
-            let toolID = option.descriptor.toolID
-            if options.count > 1 && processedToolIDs.contains(toolID) {
-                completed += 1
-                succeededCount += 1
-                appendLog("\(option.name): cache cleanup already executed via \(toolID.rawValue).")
-                continue
-            }
-            processedToolIDs.insert(toolID)
-
-            let context: ToolContext?
-            if let existingContext = option.toolContext ?? settings.cachedContext(for: option.id) {
-                context = existingContext
-            } else {
-                let probe = await option.source.probe()
-                if case .available(let probedContext) = probe {
-                    context = probedContext
-                    setSourceContext(probedContext, for: option.id)
-                } else {
-                    context = nil
-                }
-            }
-
-            guard let context else {
-                completed += 1
-                failedCount += 1
-                appendLog("\(option.name): cache clear skipped — tool executable not available.", level: .warning)
-                continue
-            }
-
-            let sourceName = option.name
-            let commandID = "clear-cache-\(option.id.rawValue)"
-            do {
-                let bytesFreed = try await option.source.clearCache(context: context) { [weak self] event in
-                    await self?.appendOutput(commandID: commandID, scope: sourceName, event: event)
-                }
-                succeededCount += 1
-                totalBytesFreed += bytesFreed
-                if bytesFreed > 0 {
-                    appendLog("\(option.name): cache cleared successfully (\(SourceSupport.formatBytes(bytesFreed)) freed).", level: .success)
-                } else {
-                    appendLog("\(option.name): cache cleared successfully.", level: .success)
-                }
-            } catch is CancellationError {
-                appendLog("\(option.name): cache clear cancelled.", level: .warning)
-                break
-            } catch let error as ProcessError where error.isCancellation {
-                appendLog("\(option.name): cache clear cancelled.", level: .warning)
-                break
-            } catch {
-                failedCount += 1
-                appendLog("\(option.name): cache clear failed — \(error.userMessage)", level: .error)
-            }
-            completed += 1
-        }
-
-        if Task.isCancelled {
-            appendLog("Cache cleanup cancelled.", level: .warning)
-        } else {
-            let freedFormatted = SourceSupport.formatBytes(totalBytesFreed)
-            appendLog("Cache cleanup completed (\(succeededCount) succeeded, \(failedCount) failed). Total space freed: \(freedFormatted).", level: failedCount > 0 ? .warning : .success)
-        }
-
-        operation = .idle
-        activeTask = nil
-        completedOperations += 1
-    }
-
     func setSourceEnabled(_ option: SourceOption, enabled: Bool) {
         guard !isBusy else { return }
         do {
@@ -390,6 +470,8 @@ final class AppViewModel {
             option.toolContext = nil
             option.probeIssue = nil
             packages.removeAll { $0.sourceID == option.id }
+            ignoredCounts[option.id] = 0
+            skippedCounts[option.id] = 0
             scanSummary = .notStarted
             updateSummary = nil
             applySort()
@@ -425,12 +507,12 @@ final class AppViewModel {
 
     func selectAll() {
         guard !isBusy else { return }
-        for package in actionablePackages { package.isSelected = true }
+        for package in visibleActionablePackages { package.isSelected = true }
     }
 
     func selectNone() {
         guard !isBusy else { return }
-        for package in actionablePackages { package.isSelected = false }
+        for package in visibleActionablePackages { package.isSelected = false }
     }
 
     func ignore(_ package: PackageUpdate, versionOnly: Bool) {
@@ -442,9 +524,10 @@ final class AppViewModel {
                 ignoredUpdates.append(key)
                 ignoredUpdates.sort()
             }
+            ignoredCounts[package.sourceID, default: 0] += 1
             packages.removeAll { $0.id == package.id }
             appendLog("Ignored \(package.name)\(versionOnly ? " \(package.availableVersion)" : ""); it will stay hidden.")
-            deriveScanSummary(completedAt: .now)
+            deriveScanSummary(completedAt: lastScanDate ?? .now)
             applySort()
         } catch {
             appendLog("Could not save the ignore rule: \(error.userMessage)", level: .error)
@@ -481,8 +564,12 @@ final class AppViewModel {
             return
         }
 
+        await brewInventory.beginScan()
+        if forceMetadataRefresh { await BrewRefresh.shared.invalidate(); forceMetadataRefresh = false }
         updateSummary = nil
         if fresh {
+            ignoredCounts.removeAll()
+            skippedCounts.removeAll()
             packages.removeAll()
             for option in sourceOptions {
                 option.scanState = option.isEnabled ? .waiting : .disabled
@@ -558,6 +645,7 @@ final class AppViewModel {
         }
 
         let completedAt = Date.now
+        lastScanDate = completedAt
         if wasCancelled || Task.isCancelled {
             scanSummary = .cancelled(completedAt)
             appendLog("Scan cancelled. Completed source results were preserved.", level: .warning)
@@ -580,6 +668,7 @@ final class AppViewModel {
             option.scanState = .unavailable(issue, completedAt: now)
             appendLog("\(option.name): unavailable — \(issue.message)", level: .warning)
         case .report(let report, let context):
+            skippedCounts[option.id] = report.skippedCount
             option.toolContext = context
             option.probeIssue = nil
             do {
@@ -618,10 +707,18 @@ final class AppViewModel {
                 && !ignored.contains("\(source.id.rawValue):\(info.id)@\(info.availableVersion)")
         }
         let hiddenCount = infos.count - visible.count
+        ignoredCounts[source.id] = hiddenCount
         if hiddenCount > 0 {
             appendLog("\(source.name): \(Self.count(hiddenCount, singular: "update", plural: "updates")) hidden by ignore rules.")
         }
-        packages.append(contentsOf: visible.map { PackageUpdate(info: $0, source: source, context: context) })
+        let grouped = Dictionary(grouping: visible, by: \.id)
+        packages.append(contentsOf: grouped.values.map { group in
+            var info = group[0]
+            if group.count > 1 { info.isIdentityAmbiguous = true; info.statusMessage = "Multiple source records share this identity; verify before updating." }
+            let package = PackageUpdate(info: info, source: source, context: context)
+            if group.count > 1 { package.isSelected = false }
+            return package
+        })
         applySort()
     }
 
@@ -640,204 +737,229 @@ final class AppViewModel {
         }
         if issueCount > 0 {
             scanSummary = .completedWithIssues(updateCount: updateCount, issueCount: issueCount, completedAt: completedAt)
-        } else if updateCount == 0 {
+        } else if detectedCount == 0 && skippedCount == 0 {
             scanSummary = .upToDate(completedAt)
         } else {
-            scanSummary = .updatesAvailable(updateCount)
+            scanSummary = .updatesAvailable(packages.count)
         }
     }
 
-    private func startUpdate(packages selected: [PackageUpdate]) {
+    private func startUpdate(packages selected: [PackageUpdate], verificationOnly: Bool = false) {
         guard activeTask == nil, !selected.isEmpty else { return }
         activeTask = Task { [weak self] in
-            await self?.runUpdates(selected)
+            await self?.runUpdates(selected, verificationOnly: verificationOnly)
         }
         startedOperations += 1
     }
 
-    private func runUpdates(_ selected: [PackageUpdate]) async {
+    func startVerify(_ package: PackageUpdate) {
+        guard !isBusy else { return }
+        startUpdate(packages: [package], verificationOnly: true)
+    }
+
+    func previewDiagnostics() {
+        do { diagnosticsPreview = try DiagnosticRedactor.export(history: history, log: logEntries) }
+        catch { appendLog("Could not prepare diagnostics: \(error.userMessage)", level: .error) }
+    }
+
+    func recoverHistory(_ entry: UpdateHistoryEntry, verifyOnly: Bool) {
+        guard !isBusy, let source = sourceOptions.first(where: { $0.id == entry.sourceID })?.source else { return }
+        let context = ToolContext(executablePath: entry.toolPath, version: "", pathEntries: [], origin: .knownPath)
+        let row = packages.first(where: { $0.sourceID == entry.sourceID && $0.packageID == entry.packageID }) ??
+            PackageUpdate(info: PackageInfo(id: entry.packageID, name: entry.name, currentVersion: entry.installedVersion ?? entry.beforeVersion,
+                availableVersion: entry.targetVersion, registryID: entry.registryID), source: source, context: context)
+        if !packages.contains(where: { $0.id == row.id }) { packages.append(row) }
+        if !verifyOnly && row.isManual { detailPackage = row; return }
+        startUpdate(packages: [row], verificationOnly: verifyOnly)
+    }
+
+    func recordExternalAction(_ package: PackageUpdate) {
+        guard !isBusy else { return }
+        let entry = UpdateHistoryEntry(runID: UUID(), sourceID: package.sourceID, packageID: package.packageID,
+            registryID: package.registryID, name: package.name, beforeVersion: package.currentVersion,
+            targetVersion: package.availableVersion, outcome: .external, toolPath: package.toolContext.executablePath,
+            evidence: "Handed off to the user. No installed version has been verified.")
+        _ = saveHistory([entry])
+    }
+
+    @discardableResult
+    private func saveHistory(_ entries: [UpdateHistoryEntry]) -> Bool {
+        do {
+            try historyStore.save(entries)
+            history = historyStore.read()
+            return true
+        } catch {
+            appendLog("Could not save update history: \(error.userMessage)", level: .error)
+            isLogVisible = true
+            return false
+        }
+    }
+
+    func cancelAndWait() async {
+        guard let task = activeTask else { return }
+        cancelOperation()
+        await task.value
+    }
+
+    private func runUpdates(_ selected: [PackageUpdate], verificationOnly: Bool) async {
         updateSummary = nil
         isLogVisible = true
-        appendLog("Updating \(Self.count(selected.count, singular: "selected package", plural: "selected packages")).")
         operation = .updating(current: nil, completed: 0, total: selected.count)
-
+        defer { operation = .idle; activeTask = nil; completedOperations += 1 }
+        let runID = UUID()
+        var attempts = Dictionary(selected.map { package in
+            let entry = UpdateHistoryEntry(runID: runID, sourceID: package.sourceID, packageID: package.packageID,
+                registryID: package.registryID, name: package.name, beforeVersion: package.currentVersion,
+                targetVersion: package.availableVersion, toolPath: package.toolContext.executablePath, verificationOnly: verificationOnly)
+            package.attemptID = entry.id
+            package.output = ""
+            return (package.id, entry)
+        }, uniquingKeysWith: { first, _ in first })
+        guard saveHistory(Array(attempts.values)) else { return }
+        appendLog("\(verificationOnly ? "Verifying" : "Updating") \(selected.count) selected package(s).")
         var summary = UpdateRunSummary()
         var completed = 0
-        var cancelled = false
-        let sourceOrder = sourceOptions.map(\.id)
-        var verificationBatches: [VerificationBatch] = []
+        var batches: [VerificationBatch] = []
+        var stop = false
 
-        for sourceID in sourceOrder {
-            let sourcePackages = selected.filter { $0.sourceID == sourceID }
-            guard !sourcePackages.isEmpty else { continue }
-            guard let source = sourcePackages.first?.sourceRef,
-                  let context = sourcePackages.first?.toolContext else { continue }
-
-            var verificationPackages: [PackageUpdate] = []
-            for package in sourcePackages {
-                if Task.isCancelled {
-                    cancelled = true
-                    break
-                }
-                operation = .updating(current: package.name, completed: completed, total: selected.count)
-
-                if package.status.needsVerificationOnly {
-                    package.status = .verifying
-                    verificationPackages.append(package)
-                    continue
-                }
-
-                package.status = .updating
-                let commandID = package.id
-                let packageName = package.name
-                lastOutputByCommandAndStream = lastOutputByCommandAndStream.filter { !$0.key.hasPrefix(commandID + "|") }
-                do {
-                    try await source.update(
-                        request: package.updateRequest,
-                        context: context
-                    ) { [weak self] event in
-                        await self?.appendOutput(commandID: commandID, scope: packageName, event: event)
-                    }
-                    package.status = .verifying
-                    verificationPackages.append(package)
-                } catch is CancellationError {
-                    package.status = .cancelled
-                    package.isSelected = true
-                    summary.cancelled += 1
-                    cancelled = true
-                    break
-                } catch let error as ProcessError where error.isCancellation {
-                    package.status = .cancelled
-                    package.isSelected = true
-                    summary.cancelled += 1
-                    cancelled = true
-                    break
-                } catch {
-                    package.status = .failed(.update, error.userMessage)
-                    package.isSelected = true
+        for option in sourceOptions {
+            let rows = selected.filter { $0.sourceID == option.id }
+            guard !rows.isEmpty, !Task.isCancelled, !stop else { continue }
+            // Reprobe at the operation boundary: a history entry or scan may hold
+            // a now-replaced manager or obsolete npm/mas version.
+            guard case .available(let context) = await option.source.probe() else {
+                for row in rows {
+                    row.status = .failed(.update, "The selected manager is unavailable. Recheck it in Sources.")
+                    attempts[row.id]?.outcome = .failed
+                    attempts[row.id]?.evidence = row.statusMessage ?? "Manager unavailable."
+                    attempts[row.id]?.finishedAt = .now
                     summary.failed += 1
-                    completed += 1
-                    appendLog("\(package.name): update failed — \(error.userMessage)", level: .error)
                 }
+                stop = !saveHistory(rows.compactMap { attempts[$0.id] })
+                continue
+            }
+            setSourceContext(context, for: option.id)
+            var verifyRows: [PackageUpdate] = []
+            for row in rows {
+                row.toolContext = context
+                guard !Task.isCancelled, !stop else { break }
+                operation = .updating(current: row.name, completed: completed, total: selected.count)
+                attempts[row.id]?.toolPath = context.executablePath
+                attempts[row.id]?.outcome = .running
+                guard saveHistory([attempts[row.id]!]) else {
+                    attempts[row.id]?.outcome = .queued
+                    stop = true
+                    break
+                }
+                row.status = verificationOnly ? .verifying : .updating
+                row.verificationEvidence = nil
+                let commandID = row.attemptID!.uuidString
+                do {
+                    if !verificationOnly {
+                        try await option.source.update(request: row.updateRequest, context: context) { [weak self, weak row] event in
+                            await self?.appendPackageOutput(row, commandID: commandID, event: event)
+                        }
+                        // Invalidate all cached capabilities after mutation, including
+                        // package managers which were themselves updated by another manager.
+                        for sourceOption in sourceOptions { try? settings.setCachedContext(nil, for: sourceOption.id) }
+                    }
+                    row.status = .verifying
+                    verifyRows.append(row)
+                    attempts[row.id]?.outcome = .unverified
+                    attempts[row.id]?.evidence = "Installed state has not yet been verified."
+                } catch {
+                    let cancelled = Task.isCancelled || (error as? ProcessError)?.isCancellation == true || error is CancellationError
+                    row.status = cancelled ? .cancelled : .failed(.update, error.userMessage)
+                    row.isSelected = !row.isManual
+                    attempts[row.id]?.outcome = cancelled ? .cancelled : .failed
+                    attempts[row.id]?.evidence = cancelled ? "Command cancelled; package changes may already have occurred. Verify before retrying." : error.userMessage
+                    attempts[row.id]?.finishedAt = .now
+                    if cancelled { summary.cancelled += 1 } else { summary.failed += 1 }
+                    appendLog("\(row.name): \(attempts[row.id]!.evidence)", level: .warning)
+                }
+                attempts[row.id]?.output = row.output
+                stop = !saveHistory([attempts[row.id]!])
+                completed += 1
                 applySort()
             }
-
-            if !verificationPackages.isEmpty {
-                verificationBatches.append(VerificationBatch(
-                    source: source,
-                    context: context,
-                    packages: verificationPackages))
-            }
-
-            applySort()
-            if cancelled { break }
+            if !verifyRows.isEmpty { batches.append(VerificationBatch(source: option.source, context: context, packages: verifyRows)) }
         }
 
-        if !verificationBatches.isEmpty {
-            operation = .updating(current: nil, completed: completed, total: selected.count)
-        }
-        let verificationOutcomes = await withTaskGroup(
-            of: VerificationOutcome.self,
-            returning: [SourceID: VerificationOutcome.Result].self
-        ) { group in
-            for batch in verificationBatches {
-                let source = batch.source
-                let context = batch.context
-                let requests = batch.packages.map(\.updateRequest)
+        let outcomes = await withTaskGroup(of: VerificationOutcome.self, returning: [SourceID: VerificationOutcome.Result].self) { group in
+            for batch in batches {
+                let source = batch.source, context = batch.context, requests = batch.packages.map(\.updateRequest)
                 group.addTask {
                     do {
-                        let results = try await source.verify(requests: requests, context: context)
-                        return VerificationOutcome(sourceID: source.id, result: .verified(results))
-                    } catch is CancellationError {
-                        return VerificationOutcome(sourceID: source.id, result: .cancelled)
-                    } catch let error as ProcessError where error.isCancellation {
-                        return VerificationOutcome(sourceID: source.id, result: .cancelled)
+                        try Task.checkCancellation()
+                        return VerificationOutcome(sourceID: source.id, result: .verified(try await source.verify(requests: requests, context: context)))
                     } catch {
+                        if Task.isCancelled || error is CancellationError || (error as? ProcessError)?.isCancellation == true {
+                            return VerificationOutcome(sourceID: source.id, result: .cancelled)
+                        }
                         return VerificationOutcome(sourceID: source.id, result: .failed(error.userMessage))
                     }
                 }
             }
-
             var results: [SourceID: VerificationOutcome.Result] = [:]
             for await outcome in group { results[outcome.sourceID] = outcome.result }
             return results
         }
-
         var removeIDs = Set<String>()
-        for batch in verificationBatches {
-            let outcome = verificationOutcomes[batch.source.id]
-            for package in batch.packages {
-                switch outcome {
-                case .verified(let results):
-                    switch results[package.packageID] {
-                    case .satisfied(let installedVersion):
-                        if let installedVersion { package.currentVersion = installedVersion }
-                        package.isSelected = false
-                        removeIDs.insert(package.id)
-                        summary.updated += 1
-                        appendLog("\(package.name) updated to \(package.currentVersion).", level: .success)
-                    case .stillOutdated(let info):
-                        package.currentVersion = info.currentVersion
-                        package.availableVersion = info.availableVersion
-                        package.status = .failed(.update, "The package is still outdated after the update command completed.")
-                        package.isSelected = true
-                        summary.failed += 1
-                        appendLog("\(package.name) is still outdated after updating.", level: .error)
-                    case nil:
-                        package.status = .failed(.verification, "The source did not return a verification result.")
-                        package.isSelected = true
-                        summary.verificationFailed += 1
-                    }
-                case .cancelled:
-                    package.status = .failed(
-                        .verification,
-                        "Verification was cancelled after the update command completed. Retry to verify it.")
-                    package.isSelected = true
-                    summary.verificationFailed += 1
-                    cancelled = true
-                case .failed(let message):
-                    package.status = .failed(
-                        .verification,
-                        "The update command completed, but verification failed: \(message)")
-                    package.isSelected = true
-                    summary.verificationFailed += 1
-                case nil:
-                    package.status = .failed(.verification, "The source did not return a verification outcome.")
-                    package.isSelected = true
+        for batch in batches {
+            for row in batch.packages {
+                let result: UpdateVerification
+                switch outcomes[batch.source.id] {
+                case .verified(let results): result = results[row.packageID] ?? .inconclusive(installedVersion: nil, evidence: "No verification result returned.")
+                case .failed(let message): result = .inconclusive(installedVersion: nil, evidence: message)
+                case .cancelled: result = .inconclusive(installedVersion: nil, evidence: "Verification was cancelled. Verify again before retrying installation.")
+                case nil: result = .inconclusive(installedVersion: nil, evidence: "No verification outcome returned.")
+                }
+                row.verificationEvidence = result.evidence
+                if let installed = result.installedVersion { row.currentVersion = installed }
+                attempts[row.id]?.installedVersion = result.installedVersion
+                attempts[row.id]?.evidence = result.evidence
+                attempts[row.id]?.finishedAt = .now
+                switch result {
+                case .satisfied(let installed) where installed != nil:
+                    row.status = .completed(verificationOnly: verificationOnly)
+                    row.isSelected = false
+                    removeIDs.insert(row.id)
+                    attempts[row.id]?.outcome = verificationOnly ? .verified : .updated
+                    if verificationOnly { summary.verified += 1 } else { summary.updated += 1 }
+                    appendLog("\(row.name): \(verificationOnly ? "verified" : "updated") at \(installed!).", level: .success)
+                case .stillOutdated(let info):
+                    row.availableVersion = info.availableVersion
+                    row.status = .failed(.update, result.evidence)
+                    row.isSelected = !row.isManual
+                    attempts[row.id]?.outcome = .failed
+                    summary.failed += 1
+                default:
+                    row.status = .failed(.verification, result.evidence)
+                    row.isSelected = !row.isManual
+                    attempts[row.id]?.outcome = .unverified
                     summary.verificationFailed += 1
                 }
-                completed += 1
-            }
-
-            switch outcome {
-            case .cancelled:
-                appendLog("\(batch.source.name): update verification cancelled.", level: .warning)
-            case .failed(let message):
-                appendLog("\(batch.source.name): update verification failed — \(message)", level: .error)
-            default:
-                break
             }
         }
+        for row in selected where attempts[row.id]?.outcome == .queued {
+            attempts[row.id]?.outcome = .notStarted
+            attempts[row.id]?.finishedAt = .now
+            attempts[row.id]?.evidence = "The run stopped before this package was started."
+            summary.notStarted += 1
+        }
+        _ = saveHistory(Array(attempts.values))
         packages.removeAll { removeIDs.contains($0.id) }
         applySort()
-
         updateSummary = summary
-        if updateCount == 0 && issueSources.isEmpty {
-            scanSummary = .updatesCompleted(.now)
-        } else if issueSources.isEmpty {
-            scanSummary = .updatesAvailable(updateCount)
-        } else {
-            let issueCount = issueSources.reduce(0) { $0 + max(1, $1.scanState.issues.count) }
-            scanSummary = .completedWithIssues(updateCount: updateCount, issueCount: issueCount, completedAt: .now)
-        }
-        if cancelled || Task.isCancelled {
-            appendLog("Update run cancelled. Unverified packages remain selected and retryable.", level: .warning)
-        } else {
-            appendLog("Update run finished.", level: summary.failed + summary.verificationFailed > 0 ? .warning : .success)
-        }
-        operation = .idle
-        activeTask = nil
-        completedOperations += 1
+        deriveScanSummary(completedAt: lastScanDate ?? .now)
+        if packages.isEmpty && ignoredCount == 0 && issueSources.isEmpty { scanSummary = .updatesCompleted(.now) }
+        appendLog("Run finished: \(summary.updated) updated, \(summary.verified) verified, \(summary.failed) failed, \(summary.verificationFailed) unverified, \(summary.cancelled) cancelled, \(summary.notStarted) not started.")
+    }
+
+    private func appendPackageOutput(_ package: PackageUpdate?, commandID: String, event: ProcessOutputEvent) {
+        guard let package else { return }
+        package.output = UpdateHistoryStore.bounded(package.output + "[\(event.stream.rawValue)] \(event.line.terminalSanitized)\n")
+        appendOutput(commandID: commandID, scope: package.name, event: event)
     }
 
     private func setSourceProbing(_ id: SourceID) {
@@ -910,7 +1032,7 @@ final class AppViewModel {
         if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String, !version.isEmpty {
             return version
         }
-        return "1.8.0"
+        return "Development"
     }
 
     private func checkForAppUpdates(force: Bool) async {
@@ -948,6 +1070,8 @@ final class AppViewModel {
                 }
             }
             appendLog("PackMan \(update.version) is staged; restarting…", level: .success)
+            operation = .idle
+            activeTask = nil
             terminateAfterStagingUpdate()
         } catch is CancellationError {
             appendLog("The PackMan update was cancelled.", level: .warning)

@@ -7,6 +7,8 @@ enum UpdateFailureKind: Sendable, Equatable {
 
 enum UpdateStatus: Sendable, Equatable {
     case pending
+    case manual
+    case completed(verificationOnly: Bool)
     case updating
     case verifying
     case failed(UpdateFailureKind, String)
@@ -15,6 +17,8 @@ enum UpdateStatus: Sendable, Equatable {
     var title: String {
         switch self {
         case .pending: return "Pending"
+        case .manual: return "Update externally"
+        case .completed(let verificationOnly): return verificationOnly ? "Verified" : "Updated"
         case .updating: return "Updating"
         case .verifying: return "Verifying"
         case .failed: return "Failed"
@@ -30,7 +34,7 @@ enum UpdateStatus: Sendable, Equatable {
     var isActionable: Bool {
         switch self {
         case .pending, .failed, .cancelled: return true
-        case .updating, .verifying: return false
+        case .updating, .verifying, .manual, .completed: return false
         }
     }
 

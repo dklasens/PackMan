@@ -311,7 +311,7 @@ final class AppUpdateTests: XCTestCase {
     private func makeAppZip(version: String) throws -> (Data, URL) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let app = try makeFakeApp(at: root.appendingPathComponent("PackMan.app"), version: version, marker: "payload-\(UUID().uuidString)")
+        let app = try makeSignedTestApp(at: root.appendingPathComponent("PackMan.app"), version: version)
         let zip = root.appendingPathComponent("PackMan-macOS.zip")
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")

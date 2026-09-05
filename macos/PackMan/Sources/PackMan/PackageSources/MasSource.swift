@@ -77,6 +77,9 @@ struct MasSource: PackageSource {
             throw SourceSupport.commandFailure("mas outdated", result: result)
         }
 
+        if !result.succeeded && issues.isEmpty {
+            issues.append(SourceIssue(kind: .command, message: "mas returned exit \(result.exitCode); results may be incomplete.", recovery: result.stderr.terminalSanitized))
+        }
         return SourceScanReport(updates: updates, issues: issues)
     }
 
@@ -113,17 +116,31 @@ struct MasSource: PackageSource {
             try await Task.sleep(for: verificationDelay)
         }
         try Task.checkCancellation()
-        // Spotlight re-indexing of the freshly installed app can lag behind the
-        // update, so tolerate partial-scan issues here instead of failing the
-        // verification outright; a still-outdated listing remains retryable.
-        let report = try await scan(context: context) { _ in }
-        let updates = Dictionary(uniqueKeysWithValues: report.updates.map { ($0.id, $0) })
-        return Dictionary(uniqueKeysWithValues: requests.map { request in
-            if let update = updates[request.packageID] {
-                return (request.packageID, .stillOutdated(update))
+        let result = try await runner.run(context.executablePath, ["list"], timeout: 60,
+            environment: SourceSupport.environment(pathEntries: context.pathEntries))
+        guard result.succeeded else { throw SourceSupport.commandFailure("mas list", result: result) }
+        if let issue = MasIndexingWarningParser.issue(fromStderr: result.stderr) ?? MasNetworkErrorParser.issue(fromStderr: result.stderr) {
+            throw SourceError.verificationFailed(issue.message)
+        }
+        let entries = try result.stdout.split(whereSeparator: \.isNewline).map { try Self.installedEntry(String($0)) }
+        return InstalledInventory.verify(requests, entries: entries)
+    }
+
+    static func installedEntry(_ line: String) throws -> InstalledInventory.Entry {
+        if line.trimmed.hasPrefix("{") {
+            let object = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+            if let rawID = object?["adamID"], let version = object?["version"] as? String {
+                let id = String(describing: rawID)
+                if PackageIdValidator.isAllDigits(id) { return .init(id: id, version: version) }
             }
-            return (request.packageID, .satisfied(installedVersion: request.targetVersion))
-        })
+        } else {
+            let pattern = try NSRegularExpression(pattern: #"^(\d+)\s+.+\s+\(([^()]+)\)\s*$"#)
+            if let match = pattern.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
+               let id = Range(match.range(at: 1), in: line), let version = Range(match.range(at: 2), in: line) {
+                return .init(id: String(line[id]), version: String(line[version]))
+            }
+        }
+        throw SourceError.verificationFailed("App Store installed inventory contains an unrecognised record.")
     }
 
     func clearCache(

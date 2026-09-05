@@ -21,8 +21,11 @@ case "$DEVELOPER_DIR" in
         ;;
 esac
 
-VERSION="${PACKMAN_VERSION:-1.8.2}"
-BUILD_NUMBER="${PACKMAN_BUILD_NUMBER:-1}"
+# project.yml is the canonical release metadata; CI may explicitly override it.
+DEFAULT_VERSION="$(awk '/^[[:space:]]*MARKETING_VERSION:/ { gsub(/"/, "", $2); print $2; exit }' project.yml)"
+DEFAULT_BUILD="$(awk '/^[[:space:]]*CURRENT_PROJECT_VERSION:/ { gsub(/"/, "", $2); print $2; exit }' project.yml)"
+VERSION="${PACKMAN_VERSION:-$DEFAULT_VERSION}"
+BUILD_NUMBER="${PACKMAN_BUILD_NUMBER:-$DEFAULT_BUILD}"
 ARCHITECTURES="${PACKMAN_ARCHS:-arm64 x86_64}"
 BUILD_ROOT="${PACKMAN_BUILD_ROOT:-$SCRIPT_DIR/.build/xcode-release}"
 OUTPUT_DIR="$SCRIPT_DIR/dist"
@@ -80,6 +83,9 @@ if [[ "$ACTUAL_VERSION" != "$VERSION" || "$ACTUAL_BUILD" != "$BUILD_NUMBER" ]]; 
 fi
 
 lipo -info "$APP/Contents/MacOS/PackMan"
+for architecture in $ARCHITECTURES; do
+    lipo "$APP/Contents/MacOS/PackMan" -verify_arch "$architecture"
+done
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$ARCHIVE"
 
 echo "Creating the disk image..."

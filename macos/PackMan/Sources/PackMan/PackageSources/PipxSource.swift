@@ -4,6 +4,7 @@ struct PipxSource: PackageSource {
     let runner: any ProcessRunning
     let resolver: any ToolResolving
     let httpClient: any HTTPDataLoading
+    private let capabilities = PipxCapabilities()
 
     init(
         runner: any ProcessRunning = ProcessRunner.shared,
@@ -60,13 +61,7 @@ struct PipxSource: PackageSource {
     }
 
     private func supportsNativeOutdated(context: ToolContext) async throws -> Bool {
-        let result = try await runner.run(
-            context.executablePath,
-            ["list", "--help"],
-            timeout: 15,
-            environment: SourceSupport.environment(pathEntries: context.pathEntries))
-        guard result.succeeded else { return false }
-        return result.stdout.contains("--outdated") && result.stdout.contains("--output")
+        try await capabilities.supportsNativeOutdated(context: context, runner: runner)
     }
 
     private func scanNative(context: ToolContext) async throws -> SourceScanReport {
@@ -76,7 +71,7 @@ struct PipxSource: PackageSource {
             timeout: 180,
             environment: SourceSupport.environment(pathEntries: context.pathEntries))
         guard let data = result.stdout.data(using: .utf8), !result.stdout.trimmed.isEmpty else {
-            if result.succeeded { return SourceScanReport() }
+            if result.succeeded { throw SourceError.commandFailed("pipx returned empty output instead of JSON.") }
             throw SourceSupport.commandFailure("pipx list --outdated", result: result)
         }
 
@@ -90,13 +85,13 @@ struct PipxSource: PackageSource {
         }
 
         let updates = envelope.data.packages
-            .filter { !$0.injected && PackageIdValidator.isValid($0.package) }
+            .filter { !$0.injected && !$0.pinned && PackageIdValidator.isValid($0.environment) && PackageIdValidator.isValid($0.package) && PackageIdValidator.isValidVersion($0.latestVersion) }
             .map {
                 PackageInfo(
-                    id: $0.package,
-                    name: $0.package,
+                    id: $0.environment,
+                    name: $0.environment == $0.package ? $0.package : "\($0.package) (\($0.environment))",
                     currentVersion: $0.version,
-                    availableVersion: $0.latestVersion)
+                    availableVersion: $0.latestVersion, registryID: $0.package)
             }
         var issues = envelope.errors.map { error in
             let scope = error.environment ?? error.package
@@ -105,13 +100,16 @@ struct PipxSource: PackageSource {
                 message: scope.map { "\($0): \(error.message)" } ?? error.message,
                 recovery: "Check the package index configuration and retry.")
         }
-        if !result.succeeded && issues.isEmpty {
+        if (!result.succeeded || envelope.exitCode != 0 || envelope.status != "success") && issues.isEmpty {
             issues.append(SourceIssue(
                 kind: .command,
                 message: "pipx reported an unsuccessful outdated check.",
                 recovery: result.stderr.trimmed.isEmpty ? "Retry the scan." : result.stderr.trimmed))
         }
-        return SourceScanReport(updates: updates, issues: issues)
+        let invalid = envelope.data.packages.filter { !PackageIdValidator.isValid($0.environment) || !PackageIdValidator.isValid($0.package) || !PackageIdValidator.isValidVersion($0.latestVersion) }
+        if !invalid.isEmpty { issues.append(SourceIssue(kind: .parsing, message: "pipx returned invalid package records.")) }
+        return SourceScanReport(updates: updates, issues: issues,
+            skippedCount: envelope.data.skipped.count + envelope.data.packages.filter { $0.pinned || $0.injected }.count)
     }
 
     private func scanLegacy(context: ToolContext) async throws -> SourceScanReport {
@@ -123,7 +121,7 @@ struct PipxSource: PackageSource {
         guard result.succeeded else { throw SourceSupport.commandFailure("pipx list", result: result) }
 
         var installed: [(name: String, version: String)] = []
-        var issues: [SourceIssue] = []
+        var issues: [SourceIssue] = [SourceIssue(kind: .configuration, message: "Legacy pipx uses public PyPI estimates; private indexes, constraints, and pins cannot be checked reliably. Upgrade pipx for native checks.")]
         for line in result.stdout.split(separator: "\n") {
             let parts = line.split(separator: " ", omittingEmptySubsequences: true)
             guard parts.count >= 2, PackageIdValidator.isValid(String(parts[0])) else {
@@ -138,7 +136,7 @@ struct PipxSource: PackageSource {
             var results: [PipxLookup] = []
 
             func enqueue() {
-                guard let package = iterator.next() else { return }
+                guard !Task.isCancelled, let package = iterator.next() else { return }
                 group.addTask {
                     await lookupPyPI(name: package.name, currentVersion: package.version)
                 }
@@ -183,7 +181,7 @@ struct PipxSource: PackageSource {
                 return .failed(name: name, message: "PyPI returned HTTP \(response.statusCode).")
             }
             let latest = try JSONDecoder().decode(PyPIResponse.self, from: response.data).info.version
-            if latest == currentVersion { return .current(name: name) }
+            if !VersionComparator.isUpgrade(from: currentVersion, to: latest) { return .current(name: name) }
             return .outdated(PackageInfo(
                 id: name,
                 name: name,
@@ -274,5 +272,25 @@ struct PyPIResponse: Decodable {
 
     struct Info: Decodable {
         let version: String
+    }
+}
+
+/// Recheck after a tool/version change or five minutes, without repeating help on every scan.
+private actor PipxCapabilities {
+    private var cache: [String: (checked: Date, supported: Bool)] = [:]
+
+    func supportsNativeOutdated(context: ToolContext, runner: any ProcessRunning) async throws -> Bool {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: context.executablePath)
+        let fingerprint = "\(attributes?[.modificationDate] ?? "")|\(attributes?[.size] ?? "")"
+        let key = context.installationKey + "|" + fingerprint
+        if let entry = cache[key], Date.now.timeIntervalSince(entry.checked) < 300 { return entry.supported }
+        let result = try await runner.run(context.executablePath, ["list", "--help"], timeout: 15,
+            environment: SourceSupport.environment(pathEntries: context.pathEntries))
+        let supported = result.succeeded && result.stdout.contains("--outdated") && result.stdout.contains("--output")
+        if result.succeeded {
+            cache = cache.filter { Date.now.timeIntervalSince($0.value.checked) < 300 }
+            cache[key] = (.now, supported)
+        }
+        return supported
     }
 }

@@ -33,11 +33,12 @@ struct PackageSortComparator: SortComparator, Hashable, Sendable {
 
     private static func statusRank(_ status: UpdateStatus) -> Int {
         switch status {
-        case .pending: return 0
+        case .pending, .manual: return 0
         case .updating: return 1
         case .verifying: return 2
         case .failed: return 3
         case .cancelled: return 4
+        case .completed: return 5
         }
     }
 

@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct PackManApp: App {
+    @NSApplicationDelegateAdaptor(PackManApplicationDelegate.self) private var appDelegate
     @State private var viewModel: AppViewModel
 
     init() {
@@ -12,6 +13,7 @@ struct PackManApp: App {
         Window("PackMan", id: "main") {
             ContentView(viewModel: viewModel)
                 .frame(minWidth: 820, minHeight: 540)
+                .onAppear { appDelegate.viewModel = viewModel }
         }
         .defaultSize(width: 1_020, height: 680)
         .commands {
@@ -51,6 +53,12 @@ struct PackManApp: App {
                 }
             }
 
+            CommandMenu("Activity") {
+                Button("Update History…") { viewModel.isHistoryPresented = true }.keyboardShortcut("h", modifiers: [.command, .shift])
+                Button("Package Details…") {
+                    if let package = viewModel.selectedPackages.first ?? viewModel.filteredPackages.first { viewModel.detailPackage = package }
+                }.keyboardShortcut("i", modifiers: .command).disabled(viewModel.filteredPackages.isEmpty)
+            }
             CommandMenu("Packages") {
                 Button(viewModel.isBusy ? "Cancel Operation" : "Scan for Updates") {
                     viewModel.isBusy ? viewModel.cancelOperation() : viewModel.startScan()
@@ -66,7 +74,7 @@ struct PackManApp: App {
 
                 Divider()
 
-                Button("Select All Updates") { viewModel.selectAll() }
+                Button("Select Visible Updates") { viewModel.selectAll() }
                     .keyboardShortcut("a", modifiers: .command)
                     .disabled(viewModel.isBusy || viewModel.updateCount == 0)
                 Button("Select None") { viewModel.selectNone() }
@@ -74,4 +82,31 @@ struct PackManApp: App {
             }
         }
     }
+}
+
+
+@MainActor
+final class PackManApplicationDelegate: NSObject, NSApplicationDelegate {
+    weak var viewModel: AppViewModel?
+    private var waitingForQuit = false
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let viewModel, viewModel.isBusy else { return .terminateNow }
+        if waitingForQuit { return .terminateLater }
+        let alert = NSAlert()
+        alert.messageText = "An operation is still running"
+        alert.informativeText = "Cancel and wait for command cleanup before quitting? Packages already changed will remain changed."
+        alert.addButton(withTitle: "Keep Working")
+        alert.addButton(withTitle: "Cancel and Quit")
+        guard alert.runModal() == .alertSecondButtonReturn else { return .terminateCancel }
+        waitingForQuit = true
+        Task {
+            await viewModel.cancelAndWait()
+            waitingForQuit = false
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }

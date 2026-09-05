@@ -38,9 +38,14 @@ struct ContentView: View {
         }
         .searchable(text: $viewModel.searchText, prompt: "Filter packages…")
         .toolbar { toolbarContent }
+        .background(WindowPersistence())
+        .sheet(item: Binding(get: { viewModel.isHistoryPresented ? nil : viewModel.detailPackage }, set: { viewModel.detailPackage = $0 })) { package in PackageDetailsView(viewModel: viewModel, package: package) }
+        .sheet(isPresented: $viewModel.isHistoryPresented) { HistoryView(viewModel: viewModel) }
+        .sheet(isPresented: Binding(get: { viewModel.isCachePresented && !viewModel.isSourcesSheetPresented }, set: { if !$0 { viewModel.isCachePresented = false } })) { CacheView(viewModel: viewModel) }
         .sheet(isPresented: $viewModel.isSourcesSheetPresented) {
             SourcesView(viewModel: viewModel)
-                .frame(minWidth: 640, minHeight: 450)
+                .frame(width: 760, height: 580)
+                .sheet(isPresented: $viewModel.isCachePresented) { CacheView(viewModel: viewModel) }
         }
         .onChange(of: viewModel.sortOrder) { _, _ in
             viewModel.applySort()
@@ -52,6 +57,20 @@ struct ContentView: View {
 
     @ViewBuilder
     private var mainContent: some View {
+        VStack(spacing: 0) {
+            if !viewModel.packages.isEmpty || viewModel.sourceFilter != nil || viewModel.statusFilter != .all {
+                HStack {
+                    Picker("Source", selection: $viewModel.sourceFilter) {
+                        Text("All sources").tag(nil as SourceID?)
+                        ForEach(viewModel.sourceOptions) { Text($0.name).tag(Optional($0.id)) }
+                    }.frame(maxWidth: 220)
+                    Picker("Status", selection: $viewModel.statusFilter) {
+                        ForEach(PackageStatusFilter.allCases) { Text($0.rawValue).tag($0) }
+                    }.frame(maxWidth: 230)
+                    Spacer()
+                    Text("\(viewModel.filteredPackages.count) of \(viewModel.packages.count) shown").foregroundStyle(.secondary)
+                }.padding(.horizontal, 16).padding(.top, 8)
+            }
         if shouldShowTable {
             PackageTable(viewModel: viewModel)
                 .padding(.horizontal, 16)
@@ -61,6 +80,8 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(24)
         }
+    }
+
     }
 
     private var shouldShowTable: Bool {
@@ -111,7 +132,7 @@ struct ContentView: View {
             Button {
                 viewModel.startUpdateSelected()
             } label: {
-                Label(updateButtonTitle, systemImage: "arrow.up.circle")
+                Label(updateButtonTitle, systemImage: "arrow.up.circle").labelStyle(.titleAndIcon)
                     .frame(minWidth: 104)
             }
             .buttonStyle(.borderedProminent)
@@ -122,15 +143,21 @@ struct ContentView: View {
         }
 
         ToolbarItem(placement: .primaryAction) {
+            Button { viewModel.isHistoryPresented = true } label: { Label("History", systemImage: "clock.arrow.circlepath") }
+                .accessibilityIdentifier("historyButton")
+        }
+        ToolbarItem(placement: .primaryAction) {
             Menu {
-                Button("Select All Updates") { viewModel.selectAll() }
+                Button("Refresh Metadata and Scan") { viewModel.refreshMetadataAndScan() }.disabled(viewModel.isBusy)
+                Divider()
+                Button("Select Visible Updates") { viewModel.selectAll() }
                     .keyboardShortcut("a", modifiers: .command)
                 Button("Select None") { viewModel.selectNone() }
             } label: {
                 Label("Selection", systemImage: "checklist")
             }
-            .disabled(viewModel.isBusy || viewModel.updateCount == 0)
-            .help("Select or deselect actionable updates")
+            .disabled(viewModel.isBusy)
+            .help("Refresh metadata or change visible update selection")
         }
 
         ToolbarItem(placement: .primaryAction) {
@@ -150,7 +177,7 @@ struct ContentView: View {
                 Button {
                     viewModel.startClearAllCaches()
                 } label: {
-                    Label("Clear All Caches", systemImage: "broom.fill")
+                    Label("Package Caches…", systemImage: "internaldrive")
                 }
                 .disabled(viewModel.isBusy)
 
@@ -163,7 +190,7 @@ struct ContentView: View {
                     }
                 }
             } label: {
-                Label("Clear Cache", systemImage: "broom")
+                Label("Clear Cache", systemImage: "internaldrive")
             }
             .help("Clear package manager caches")
             .accessibilityIdentifier("clearCacheMenu")
@@ -218,6 +245,7 @@ private struct PackageSourceIcon: View {
 
 private struct PackageTable: View {
     @Bindable var viewModel: AppViewModel
+    @SceneStorage("PackMan.packageColumns") private var columns: TableColumnCustomization<PackageUpdate>
 
     var body: some View {
         VStack(spacing: 6) {
@@ -226,7 +254,7 @@ private struct PackageTable: View {
                     allSelected ? viewModel.selectNone() : viewModel.selectAll()
                 } label: {
                     Label(
-                        allSelected ? "Deselect All Updates" : "Select All Updates",
+                        allSelected ? "Deselect Visible Updates" : "Select Visible Updates",
                         systemImage: selectionSymbol)
                 }
                 .buttonStyle(.plain)
@@ -234,29 +262,35 @@ private struct PackageTable: View {
                 .accessibilityIdentifier("selectAllUpdates")
 
                 Spacer()
-                Text(viewModel.footerText)
+                Text("\(viewModel.selectedPackages.count) visible selected · \(viewModel.totalSelectedCount) selected total")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 4)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
 
-            Table(of: PackageUpdate.self, sortOrder: $viewModel.sortOrder) {
+            Table(of: PackageUpdate.self, sortOrder: $viewModel.sortOrder, columnCustomization: $columns) {
                 TableColumn("Select") { package in
                     Toggle("Select \(package.name) for update", isOn: Binding(
                         get: { package.isSelected },
                         set: { package.isSelected = $0 }))
                         .labelsHidden()
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .disabled(viewModel.isBusy || !package.isActionable)
                         .accessibilityLabel("Select \(package.name) for update")
                 }
                 .width(48)
 
                 TableColumn("Name", sortUsing: PackageSortComparator(field: .name)) { package in
-                    Text(package.name)
+                    Button(package.name) { viewModel.detailPackage = package }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Details for \(package.name)")
                         .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .help(package.name)
                         .accessibilityIdentifier("package-\(package.sourceID.rawValue)-\(package.packageID)")
                 }
+                .customizationID("name")
                 TableColumn("Source", sortUsing: PackageSortComparator(field: .source)) { package in
                     HStack(spacing: 6) {
                         PackageSourceIcon(sourceID: package.sourceID)
@@ -266,26 +300,33 @@ private struct PackageTable: View {
                     .help(package.source)
                 }
                 .width(min: 100, ideal: 125, max: 160)
+                .customizationID("source")
                 TableColumn("Current", sortUsing: PackageSortComparator(field: .currentVersion)) { package in
                     Text(package.currentVersion)
                         .lineLimit(1)
                         .help(package.currentVersion)
                 }
                 .width(min: 78, ideal: 105)
+                .customizationID("current")
                 TableColumn("Available", sortUsing: PackageSortComparator(field: .availableVersion)) { package in
                     Text(package.availableVersion)
                         .lineLimit(1)
                         .help(package.availableVersion)
                 }
                 .width(min: 78, ideal: 105)
+                .customizationID("available")
                 TableColumn("Status", sortUsing: PackageSortComparator(field: .status)) { package in
                     StatusCell(status: package.status, packageName: package.name)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .width(min: 110, ideal: 130, max: 180)
+                .customizationID("status")
             } rows: {
                 ForEach(viewModel.filteredPackages) { package in
                     TableRow(package)
                         .contextMenu {
+                            Button("Package details…") { viewModel.detailPackage = package }
+                            Button("Verify again") { viewModel.startVerify(package) }.disabled(viewModel.isBusy)
                             Button {
                                 viewModel.startUpdateSingle(package)
                             } label: {
@@ -298,7 +339,7 @@ private struct PackageTable: View {
                                     viewModel.startClearCacheSingle(option)
                                 }
                             } label: {
-                                Label("Clear Cache for \(package.source)", systemImage: "broom")
+                                Label("Clear Cache for \(package.source)", systemImage: "internaldrive")
                             }
                             .disabled(viewModel.isBusy)
 
@@ -323,7 +364,7 @@ private struct PackageTable: View {
 
                                 if let appStoreURL = MasSource.appStorePageURL(forADAMID: package.packageID) {
                                     Button {
-                                        NSWorkspace.shared.open(appStoreURL)
+                                        if NSWorkspace.shared.open(appStoreURL) { viewModel.recordExternalAction(package) }
                                     } label: {
                                         Label("Open in App Store", systemImage: "app.badge")
                                     }
@@ -353,7 +394,7 @@ private struct PackageTable: View {
     }
 
     private var allSelected: Bool {
-        viewModel.updateCount > 0 && viewModel.selectedCount == viewModel.updateCount
+        !viewModel.visibleActionablePackages.isEmpty && viewModel.selectedCount == viewModel.visibleActionablePackages.count
     }
 
     private var selectionSymbol: String {
@@ -363,11 +404,11 @@ private struct PackageTable: View {
     }
 
     private func contextActionTitle(for package: PackageUpdate) -> String {
-        package.status.needsVerificationOnly ? "Retry Verification" : "Update \(package.name)"
+        "Update / retry install"
     }
 
     private func contextActionIcon(for package: PackageUpdate) -> String {
-        package.status.needsVerificationOnly ? "checkmark.arrow.trianglehead.counterclockwise" : "arrow.up.circle"
+        "arrow.up.circle"
     }
 }
 
@@ -377,23 +418,15 @@ private struct StatusCell: View {
     @State private var showsDetail = false
 
     var body: some View {
-        Button {
-            if status.message != nil { showsDetail.toggle() }
-        } label: {
-            HStack(spacing: 5) {
-                statusIcon
-                Text(status.title)
-                    .font(.caption)
-                    .fontWeight(.medium)
-                    .lineLimit(1)
+        Group {
+            if status.message != nil {
+                Button { showsDetail.toggle() } label: { badge }
+                    .buttonStyle(.plain)
+                    .help("Show details for \(packageName)")
+            } else {
+                badge
             }
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2.5)
-            .background(color.opacity(0.12), in: Capsule())
-            .foregroundStyle(color)
         }
-        .buttonStyle(.plain)
-        .disabled(status.message == nil)
         .popover(isPresented: $showsDetail) {
             if let message = status.message {
                 VStack(alignment: .leading, spacing: 8) {
@@ -411,10 +444,26 @@ private struct StatusCell: View {
     }
 
     @ViewBuilder
+    private var badge: some View {
+        HStack(spacing: 5) {
+            statusIcon
+            Text(status.title).font(.caption.weight(.medium)).lineLimit(1)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .foregroundStyle(color)
+        .background(color.opacity(0.10), in: Capsule())
+    }
+
+    @ViewBuilder
     private var statusIcon: some View {
         switch status {
         case .pending:
             Image(systemName: "clock")
+        case .manual:
+            Image(systemName: "arrow.up.forward.app")
+        case .completed:
+            Image(systemName: "checkmark.circle.fill")
         case .updating, .verifying:
             ProgressView().controlSize(.mini)
         case .failed:
@@ -426,10 +475,11 @@ private struct StatusCell: View {
 
     private var color: Color {
         switch status {
-        case .pending: return .secondary
+        case .pending, .manual: return .secondary
         case .updating, .verifying: return .accentColor
         case .failed: return .red
         case .cancelled: return .orange
+        case .completed: return .green
         }
     }
 }
@@ -511,7 +561,7 @@ private struct EmptyStateView: View {
     @Bindable var viewModel: AppViewModel
 
     var body: some View {
-        if !viewModel.searchText.trimmed.isEmpty {
+        if !viewModel.searchText.trimmed.isEmpty || viewModel.sourceFilter != nil || viewModel.statusFilter != .all {
             ContentUnavailableView.search(text: viewModel.searchText)
         } else {
             switch viewModel.scanSummary {
@@ -531,17 +581,17 @@ private struct EmptyStateView: View {
                 ContentUnavailableView(
                     "No Displayable Updates",
                     systemImage: "shippingbox",
-                    description: Text("Updates found by the last scan are hidden by ignore rules. See Sources → Ignored Updates."))
+                    description: Text("\(viewModel.ignoredCount) ignored updates; \(viewModel.skippedCount) source exclusions. Review Sources for coverage and ignored updates."))
             case .updatesCompleted(let date):
                 state(
                     title: "Updates Completed",
                     systemImage: "checkmark.circle",
-                    description: "The selected packages were updated and verified at \(date.formatted(date: .omitted, time: .shortened)).",
+                    description: "The selected packages were verified at \(date.formatted(date: .omitted, time: .shortened)).",
                     action: "Scan Again",
                     actionHandler: viewModel.startScan)
             case .upToDate(let date):
                 state(
-                    title: "System is Up to Date",
+                    title: "No Updates Found",
                     systemImage: "checkmark.circle",
                     description: "Every enabled source completed successfully. Last scanned \(date.formatted(date: .omitted, time: .shortened)).",
                     action: "Scan Again",
@@ -651,14 +701,15 @@ private struct FooterView: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Text(viewModel.footerStatusText)
-                .lineLimit(1)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(viewModel.footerStatusText)
+                Text(viewModel.footerText).font(.caption)
+            }
             Spacer()
             if !viewModel.issueSources.isEmpty {
                 Label("\(viewModel.issueSources.count) source issue\(viewModel.issueSources.count == 1 ? "" : "s")", systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.orange)
             }
-            Text(viewModel.footerText)
             Text("v\(AppViewModel.appVersion)")
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.secondary)
@@ -762,42 +813,45 @@ private struct SourcesView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text("Sources").font(.title2.bold())
-                        Text("v\(AppViewModel.appVersion)")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(.quaternary, in: Capsule())
-                    }
-                    Text("Choose package managers and the executables PackMan should use.")
-                        .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Text("Sources").font(.title2.bold())
+                    Text("v\(AppViewModel.appVersion)").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Package Caches…") { viewModel.startClearAllCaches() }
+                        .disabled(viewModel.isBusy || viewModel.sourceOptions.allSatisfy { !$0.isEnabled })
+                    Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
                 }
-                Spacer()
-
-                Button {
-                    viewModel.startClearAllCaches()
-                } label: {
-                    Label("Clear All Caches", systemImage: "broom.fill")
-                }
-                .disabled(viewModel.isBusy || viewModel.sourceOptions.allSatisfy { !$0.isEnabled })
-                .padding(.trailing, 8)
-
-                Button("Done") { dismiss() }
-                    .keyboardShortcut(.defaultAction)
+                Text("Choose the package managers and environments to use on this Mac.")
+                    .foregroundStyle(.secondary)
             }
-            .padding()
+            .padding(20)
 
             Divider()
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        if viewModel.sourceSetupSuggested {
+                            Text("Choose the sources to use on this Mac").font(.headline)
+                            Text("Detection does not change your choices until you apply it.")
+                        }
+                        HStack {
+                            Button("Recheck availability") { viewModel.recheckSources() }.disabled(viewModel.isBusy)
+                            Button("Use detected sources") { viewModel.useDetectedSources() }.disabled(viewModel.isBusy || !viewModel.hasProbedSources)
+                            if viewModel.sourceSetupSuggested {
+                                Button("Keep current choices") { viewModel.finishSourceSetup() }.disabled(viewModel.isBusy)
+                            }
+                        }
+                        Toggle("Check casks that update themselves", isOn: Binding(get: { viewModel.includeSelfUpdatingCasks }, set: viewModel.setCaskPolicy))
+                            .disabled(viewModel.isBusy)
+                        Text("Homebrew pins are respected. Unversioned casks and applications outside the selected managers are not fully covered.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }.padding(20)
+                    Divider()
                     ForEach(viewModel.sourceOptions) { option in
                         SourceSettingsRow(viewModel: viewModel, option: option)
-                        Divider().padding(.leading, 48)
+                        Divider().padding(.horizontal, 20)
                     }
 
                     if viewModel.hasIgnoredUpdates {
@@ -846,102 +900,79 @@ private struct SourceSettingsRow: View {
     @Bindable var option: SourceOption
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Toggle(option.name, isOn: Binding(
-                get: { option.isEnabled },
-                set: { viewModel.setSourceEnabled(option, enabled: $0) }))
-                .toggleStyle(.checkbox)
-                .frame(width: 150, alignment: .leading)
-                .disabled(viewModel.isBusy)
-
-            VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 12) {
+                Toggle(option.name, isOn: Binding(
+                    get: { option.isEnabled },
+                    set: { viewModel.setSourceEnabled(option, enabled: $0) }))
+                    .toggleStyle(.checkbox)
+                    .fontWeight(.medium)
+                    .disabled(viewModel.isBusy)
+                Spacer(minLength: 12)
+                if option.id != .appStore {
+                    Button("Cache…") { viewModel.startClearCacheSingle(option) }
+                        .disabled(viewModel.isBusy || !option.isEnabled)
+                        .help("Preview caches for \(option.name)")
+                }
+                Button("Choose Executable…") { chooseExecutable() }
+                    .disabled(viewModel.isBusy)
+            }
+            VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) {
                     SourceStateIcon(state: option.scanState)
-                    HStack(spacing: 4) {
-                        PackageSourceIcon(sourceID: option.id)
-                        Text(sourceStatus)
-                            .foregroundStyle(statusColor)
-                    }
+                    Text(sourceStatus).foregroundStyle(statusColor)
                     if let completedAt = option.scanState.completedAt {
-                        Text("• Last checked \(completedAt.formatted(date: .omitted, time: .shortened))")
-                            .font(.caption)
+                        Spacer()
+                        Text("Scanned \(completedAt.formatted(date: .omitted, time: .shortened))")
                             .foregroundStyle(.secondary)
                     }
-                }
-
-                if let hint = option.source.requirementHint {
-                    Text(hint)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                }.font(.caption)
 
                 if let context = option.toolContext {
                     Text(context.executablePath)
                         .font(.system(.caption, design: .monospaced))
                         .textSelection(.enabled)
-                        .lineLimit(1)
                         .help(context.executablePath)
                     Text("\(context.version) • \(context.origin.rawValue)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                        .font(.caption).foregroundStyle(.secondary)
                 } else if let override = viewModel.executableOverride(for: option.descriptor.toolID) {
-                    Text(override)
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .help(override)
+                    Text(override).font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary).textSelection(.enabled)
                 }
-
+                if let description = option.environmentDescription {
+                    Text(description).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                } else if let context = option.toolContext {
+                    Text(SourceEnvironmentInspector.scope(option.id, context: context)).font(.caption).foregroundStyle(.secondary)
+                }
+                if let hint = option.source.requirementHint {
+                    Text(hint).font(.caption).foregroundStyle(.secondary)
+                }
                 if let issue = option.probeIssue ?? option.scanState.issues.first {
-                    Text(issue.message)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    if let recovery = issue.recovery {
-                        Text(recovery)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    Text(issue.message).font(.caption).foregroundStyle(.orange)
+                    if let recovery = issue.recovery { Text(recovery).font(.caption).foregroundStyle(.secondary) }
                 }
+                HStack(spacing: 14) {
+                    if viewModel.executableOverride(for: option.descriptor.toolID) != nil {
+                        Button("Use Automatic") { viewModel.setExecutableOverride(nil, for: option.descriptor.toolID) }
+                            .buttonStyle(.link).disabled(viewModel.isBusy)
+                    }
+                    if let url = option.descriptor.installationURL,
+                       option.scanState.isUnavailable || option.probeIssue != nil {
+                        Link("Installation Help", destination: url)
+                    }
+                }.font(.caption)
             }
-
-            Spacer(minLength: 8)
-
-            VStack(alignment: .trailing, spacing: 6) {
-                HStack(spacing: 8) {
-                    Button {
-                        viewModel.startClearCacheSingle(option)
-                    } label: {
-                        Label("Clear Cache", systemImage: "broom")
-                    }
-                    .disabled(viewModel.isBusy || !option.isEnabled)
-
-                    Button("Choose…") { chooseExecutable() }
-                        .disabled(viewModel.isBusy)
-                }
-
-                if viewModel.executableOverride(for: option.descriptor.toolID) != nil {
-                    Button("Use Automatic") {
-                        viewModel.setExecutableOverride(nil, for: option.descriptor.toolID)
-                    }
-                    .buttonStyle(.link)
-                    .disabled(viewModel.isBusy)
-                }
-                if let url = option.descriptor.installationURL,
-                   option.scanState.isUnavailable || option.probeIssue != nil {
-                    Link("Installation Help", destination: url)
-                        .font(.caption)
-                }
-            }
+            .padding(.leading, 22)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
     }
 
     private var sourceStatus: String {
         switch option.scanState {
         case .disabled: return "Disabled"
-        case .notScanned, .waiting: return "Not checked"
+        case .notScanned, .waiting: return option.toolContext == nil ? "Not checked" : "Available • Not scanned yet"
         case .probing: return "Checking availability"
         case .scanning(let phase, _): return phase.rawValue
         case .succeeded(let count, _): return count == 1 ? "Available • 1 update" : "Available • \(count) updates"

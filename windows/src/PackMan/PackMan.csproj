@@ -9,7 +9,7 @@
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <AssemblyName>PackMan</AssemblyName>
     <RootNamespace>PackMan</RootNamespace>
-    <Version>1.9.0</Version>
+    <Version>1.9.1</Version>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>false</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
