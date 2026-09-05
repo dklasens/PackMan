@@ -19,8 +19,17 @@
                 <TextBlock Text="Choose package managers and the executables PackMan should use."
                            Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,3,0,0" />
             </StackPanel>
-            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <ScrollViewer x:Name="SourcesScroll" AutomationProperties.AutomationId="sourcesScroll"
+                          Grid.Row="1" VerticalScrollBarVisibility="Auto">
                 <StackPanel>
+                    <StackPanel Margin="18,8,18,14">
+                        <CheckBox Content="Include WinGet packages with an unknown installed version"
+                            AutomationProperties.AutomationId="includeUnknownVersions"
+                            IsChecked="{Binding IncludeUnknownVersions}"
+                            IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
+                        <TextBlock Text="These may already be current. Enabling this permits their selected updates to reinstall them. Scan again after changing this choice."
+                            TextWrapping="Wrap" Margin="24,5,0,0" />
+                    </StackPanel>
                     <ItemsControl ItemsSource="{Binding SourceOptions}">
                     <ItemsControl.ItemTemplate>
                         <DataTemplate>
@@ -79,6 +88,7 @@
                         </StackPanel>
                     </Border>
                     <Border Padding="18,13" BorderThickness="0,1,0,0" BorderBrush="#18000000">
+                        <StackPanel>
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
@@ -86,17 +96,33 @@
                             </Grid.ColumnDefinitions>
                             <StackPanel Margin="0,0,18,0">
                                 <TextBlock Text="Package Cache" FontWeight="SemiBold" Margin="0,4,0,3" />
-                                <TextBlock Text="Purge downloaded installers and package caches from every available source. Files are downloaded again when needed."
+                                <TextBlock Text="Choose the caches to clear. Space estimates can overlap when managers share a cache. Files are downloaded again when needed."
                                            TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
                                 <TextBlock Text="{Binding CacheCleanupStatus}" TextWrapping="Wrap" Margin="0,7,0,0"
                                            Visibility="{Binding HasCacheCleanupStatus, Converter={StaticResource BoolToVis}}" />
                             </StackPanel>
                             <ui:Button Grid.Column="1" AutomationProperties.AutomationId="clearCacheButton"
-                                       Content="Clear Cache" Command="{Binding ClearCacheCommand}"
+                                       Content="Clear Selected" Command="{Binding ClearCacheCommand}"
                                        IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}"
                                        Padding="14,6" VerticalAlignment="Top" Margin="0,4,0,0"
                                        ToolTip="Purge staged installers and cached package downloads" />
                         </Grid>
+                        <ui:Button Content="Preview selected caches" AutomationProperties.AutomationId="previewCachesButton" Command="{Binding PreviewCachesCommand}" HorizontalAlignment="Left"
+                            IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" Margin="0,12,0,6" />
+                        <ItemsControl ItemsSource="{Binding CacheOptions}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <StackPanel Margin="0,10">
+                                        <CheckBox Content="{Binding Name}" IsChecked="{Binding IsSelected}"
+                                            IsEnabled="{Binding DataContext.IsBusy, ElementName=Root, Converter={StaticResource InverseBool}}" />
+                                        <TextBlock Text="{Binding Scope}" TextWrapping="Wrap" Margin="24,5,0,0" />
+                                        <TextBlock Text="{Binding PreviewText}" TextWrapping="Wrap" Margin="24,5,0,0" />
+                                        <TextBlock Text="{Binding ResultText}" TextWrapping="Wrap" FontWeight="SemiBold" Margin="24,5,0,0" />
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        </StackPanel>
                     </Border>
                 </StackPanel>
             </ScrollViewer>

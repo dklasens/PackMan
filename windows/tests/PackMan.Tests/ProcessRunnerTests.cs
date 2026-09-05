@@ -50,6 +50,15 @@ public sealed class ProcessRunnerTests
     }
 
     [Fact]
+    public async Task TimeoutStopsACommandAndReportsTimeoutRatherThanSuccess()
+    {
+        var runner = new ProcessRunner(new StubElevationBroker());
+        await Assert.ThrowsAsync<TimeoutException>(() => runner.RunAsync(new ProcessInvocation(
+            "powershell.exe", ["-NoProfile", "-Command", "Start-Sleep -Seconds 10"],
+            Timeout: TimeSpan.FromMilliseconds(250))).WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
     public async Task CmdScriptReceivesSimpleArgumentsUnquoted()
     {
         // Scoop's .cmd shim rewrites double quotes in %* to single quotes; a simple argument

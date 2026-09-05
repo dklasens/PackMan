@@ -45,12 +45,18 @@
                             <MenuItem Header="Select All Updates" Command="{Binding SelectAllCommand}" />
                             <MenuItem Header="Select None" Command="{Binding SelectNoneCommand}" />
                         </MenuItem>
+                        <MenuItem Header="Activity" AutomationProperties.AutomationId="activityMenu">
+                            <MenuItem Header="Package details" AutomationProperties.AutomationId="detailsMenuItem" Click="Details_Click" />
+                            <MenuItem Header="Update history" AutomationProperties.AutomationId="historyMenuItem" Click="History_Click" />
+                            <MenuItem Header="Export redacted diagnostics" Command="{Binding ExportDiagnosticsCommand}" />
+                        </MenuItem>
                         <MenuItem Header="Help">
                             <MenuItem Header="Check for Updates" Command="{Binding CheckForUpdatesCommand}" />
                         </MenuItem>
                     </Menu>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
+                    <ui:Button AutomationProperties.AutomationId="detailsButton" Content="Details" Click="Details_Click" Padding="13,7" Margin="0,0,8,0" />
                     <ui:Button AutomationProperties.AutomationId="sourcesButton" Content="Sources" Click="Sources_Click" Padding="13,7" Margin="0,0,8,0"
                                ToolTip="Configure package sources and executables" />
                     <ui:Button Content="{Binding LogButtonText}" Command="{Binding ToggleLogCommand}" Padding="13,7"
@@ -117,6 +123,8 @@
                             <Setter Property="ContextMenu">
                                 <Setter.Value>
                                     <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                                        <MenuItem Header="Package details" Command="{Binding Data.ShowPackageDetailsCommand, Source={StaticResource VmProxy}}" CommandParameter="{Binding}" />
+                                        <MenuItem Header="Verify again" Command="{Binding Data.VerifyAgainCommand, Source={StaticResource VmProxy}}" CommandParameter="{Binding}" />
                                         <MenuItem Header="Update / Retry" Command="{Binding Data.UpdateSingleCommand, Source={StaticResource VmProxy}}" CommandParameter="{Binding}" />
                                         <MenuItem Header="Retry as administrator" Command="{Binding Data.RetryElevatedCommand, Source={StaticResource VmProxy}}" CommandParameter="{Binding}" />
                                         <Separator />
@@ -134,6 +142,7 @@
                             <DataGridTemplateColumn.CellTemplate>
                                 <DataTemplate>
                                     <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                              AutomationProperties.Name="{Binding Name, StringFormat='Select {0}'}"
                                               IsEnabled="{Binding DataContext.IsBusy, RelativeSource={RelativeSource AncestorType=DataGrid}, Converter={StaticResource InverseBool}}"
                                               HorizontalAlignment="Center" VerticalAlignment="Center" />
                                 </DataTemplate>
@@ -210,7 +219,12 @@
                 </DockPanel>
             </Border>
 
-            <StatusBar Grid.Row="7">
+            <StackPanel Grid.Row="7">
+                <DockPanel Margin="16,4" Visibility="{Binding HasUpdateSummary, Converter={StaticResource BoolToVis}}">
+                    <ui:Button DockPanel.Dock="Right" Content="Retry failed" Command="{Binding RetryFailedCommand}" />
+                    <TextBlock Text="{Binding UpdateSummaryText}" TextWrapping="Wrap" VerticalAlignment="Center" />
+                </DockPanel>
+            <StatusBar>
                 <TextBlock Text="{Binding StatusText}" Margin="8,2" />
                 <Separator />
                 <TextBlock Text="{Binding SourceIssueCount, StringFormat='{}{0} source issues'}" Margin="8,2"
@@ -219,6 +233,7 @@
                                Foreground="{DynamicResource TextFillColorSecondaryBrush}" ToolTip="PackMan version" /></StatusBarItem>
                 <StatusBarItem HorizontalAlignment="Right"><TextBlock Text="{Binding FooterText}" Margin="8,2" /></StatusBarItem>
             </StatusBar>
+            </StackPanel>
         </Grid>
     </DockPanel>
 </ui:FluentWindow>

@@ -7,10 +7,23 @@ namespace PackMan;
 
 public partial class SourcesWindow : FluentWindow
 {
+    private readonly MainViewModel _viewModel;
     public SourcesWindow(MainViewModel viewModel)
     {
+        _viewModel = viewModel;
         DataContext = viewModel;
         InitializeComponent();
+        Loaded += (_, _) => Services.UiTestEnvironment.CaptureWindow(this, "cache-preview.png");
+        SizeChanged += (_, _) => Services.UiTestEnvironment.CaptureWindow(this, "cache-preview.png");
+        SourcesScroll.ScrollChanged += (_, _) => Services.UiTestEnvironment.CaptureWindow(this, "cache-preview.png");
+        viewModel.PropertyChanged += OnViewModelChanged;
+        Closed += (_, _) => viewModel.PropertyChanged -= OnViewModelChanged;
+    }
+
+    private void OnViewModelChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(MainViewModel.IsBusy) && !_viewModel.IsBusy)
+            Services.UiTestEnvironment.CaptureWindow(this, "cache-preview.png");
     }
 
     private void Done_Click(object sender, RoutedEventArgs e) => Close();

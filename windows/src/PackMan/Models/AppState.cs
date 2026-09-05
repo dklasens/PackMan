@@ -46,7 +46,7 @@ public partial class SourceState : ObservableObject
     }
 }
 
-public enum AppOperationKind { Idle, Scanning, Updating, Installing, CleaningCache, Cancelling, UpdatingApp }
+public enum AppOperationKind { Idle, Scanning, Updating, Installing, CleaningCache, Cancelling, UpdatingApp, InspectingCache, InspectingPackage }
 public enum ScanSummaryKind
 {
     NotStarted,
@@ -54,13 +54,20 @@ public enum ScanSummaryKind
     UpdatesAvailable,
     UpdatesCompleted,
     UpToDate,
+    IgnoredOnly,
     CompletedWithIssues,
     AllUnavailable,
     NoSources,
     Cancelled,
 }
 
-public sealed record UpdateRunSummary(int Updated, int Failed, int Cancelled, int VerificationFailed);
+public sealed record UpdateRunSummary(int Updated, int Failed, int Cancelled, int VerificationFailed,
+    int NotStarted = 0, int RestartRequired = 0, int Verified = 0)
+{
+    public string DisplayText => $"{Updated} updated • {Verified} verified • {Failed} failed • {VerificationFailed} unverified • "
+        + $"{Cancelled} cancelled • {NotStarted} not started"
+        + (RestartRequired > 0 ? $" • {RestartRequired} require restart" : "");
+}
 
 public enum LogLevel { Info, Output, Warning, Error, Success }
 public sealed record LogEntry(

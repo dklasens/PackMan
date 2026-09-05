@@ -15,6 +15,24 @@ public sealed class PipxSource(IToolResolver resolver, IProcessRunner runner, Ht
 
     private bool? _nativeOutdatedSupported;
 
+    public override async Task<IReadOnlyDictionary<string, UpdateVerification>> VerifyAsync(
+        IReadOnlyList<UpdateRequest> requests, ToolContext context, CancellationToken cancellationToken = default)
+    {
+        var result = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
+            Arguments(context, "list", "--short"), context.Environment, TimeSpan.FromMinutes(1)), cancellationToken: cancellationToken);
+        if (!result.Success) throw SourceSupport.CommandFailure("pipx installed inventory", result);
+        var installed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var line in result.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2 || !PackageIdValidator.IsValid(parts[0]) || !PackageIdValidator.IsValidVersion(parts[1]))
+                throw new SourceException(SourceIssueKind.Verification, "pipx returned an unrecognized installed-package record.");
+            installed[parts[0]] = parts[1];
+        }
+        return requests.ToDictionary(r => r.Identity, r => VerifyInstalled(installed.GetValueOrDefault(r.PackageId), r),
+            StringComparer.OrdinalIgnoreCase);
+    }
+
     public override bool SupportsCacheClear => true;
 
     public override async Task<string> ClearCacheAsync(ToolContext context,
@@ -67,7 +85,7 @@ public sealed class PipxSource(IToolResolver resolver, IProcessRunner runner, Ht
             : await ScanLegacyAsync(context, cancellationToken);
     }
 
-    public override async Task UpdateAsync(UpdateRequest request, ToolContext context,
+    public override async Task<UpdateResult> UpdateAsync(UpdateRequest request, ToolContext context,
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
     {
         Validate(request);
@@ -75,6 +93,7 @@ public sealed class PipxSource(IToolResolver resolver, IProcessRunner runner, Ht
             Arguments(context, "upgrade", request.PackageId), context.Environment, TimeSpan.FromMinutes(15), request.Elevated),
             output, cancellationToken);
         if (!result.Success) throw SourceSupport.CommandFailure("pipx upgrade", result);
+        return new();
     }
 
     private async Task<SourceScanReport> ScanNativeAsync(ToolContext context, CancellationToken cancellationToken)

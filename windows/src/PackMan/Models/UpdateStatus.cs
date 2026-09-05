@@ -7,6 +7,8 @@ public enum UpdateStatus
     Verifying,
     Failed,
     Cancelled,
+    Updated,
+    Verified,
 }
 
 public enum UpdateFailureKind

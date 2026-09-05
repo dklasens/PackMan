@@ -25,7 +25,7 @@ public sealed class ChocoSource : PackageSourceBase
         var result = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
             Arguments(context, "outdated", "-r", "--no-color"), context.Environment, TimeSpan.FromMinutes(5)),
             cancellationToken: cancellationToken);
-        if (!result.Success) throw SourceSupport.CommandFailure("choco outdated", result);
+        if (result.ExitCode is not (0 or 2)) throw SourceSupport.CommandFailure("choco outdated", result);
         var updates = new List<PackageInfo>();
         var issues = new List<SourceIssue>();
         foreach (var line in result.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
@@ -43,6 +43,26 @@ public sealed class ChocoSource : PackageSourceBase
     }
 
     public override bool SupportsCacheClear => true;
+
+    public override async Task<IReadOnlyDictionary<string, UpdateVerification>> VerifyAsync(
+        IReadOnlyList<UpdateRequest> requests, ToolContext context, CancellationToken cancellationToken = default)
+    {
+        var args = new List<string> { "list", "--limit-output", "--no-color" };
+        if (context.Version.TrimStart('v').StartsWith("1.", StringComparison.Ordinal)) args.Add("--local-only");
+        var result = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath, Arguments(context, [.. args]),
+            context.Environment, TimeSpan.FromMinutes(1)), cancellationToken: cancellationToken);
+        if (result.ExitCode is not (0 or 2)) throw SourceSupport.CommandFailure("Chocolatey installed inventory", result);
+        var installed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var line in result.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var parts = line.Split('|');
+            if (parts.Length != 2 || !PackageIdValidator.IsValid(parts[0]) || !PackageIdValidator.IsValidVersion(parts[1]))
+                throw new SourceException(SourceIssueKind.Verification, "Chocolatey's installed inventory contained an unrecognized record.");
+            installed[parts[0]] = parts[1];
+        }
+        return requests.ToDictionary(r => r.Identity, r => VerifyInstalled(installed.GetValueOrDefault(r.PackageId), r),
+            StringComparer.OrdinalIgnoreCase);
+    }
 
     public override async Task<string> ClearCacheAsync(ToolContext context,
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
@@ -149,13 +169,19 @@ public sealed class ChocoSource : PackageSourceBase
             "chocolatey", "cache"),
     ];
 
-    public override async Task UpdateAsync(UpdateRequest request, ToolContext context,
+    public override async Task<UpdateResult> UpdateAsync(UpdateRequest request, ToolContext context,
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
     {
         Validate(request);
         var result = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
             Arguments(context, "upgrade", request.PackageId, "--version", request.TargetVersion, "-y", "--no-progress"),
             context.Environment, TimeSpan.FromMinutes(15), Elevated: true), output, cancellationToken);
-        if (!result.Success) throw SourceSupport.CommandFailure("choco upgrade", result);
+        return result.ExitCode switch
+        {
+            0 or 2 => new(ExitCode: result.ExitCode),
+            3010 => new(RestartState.Required, result.ExitCode),
+            1641 => new(RestartState.Initiated, result.ExitCode),
+            _ => throw SourceSupport.CommandFailure("choco upgrade", result),
+        };
     }
 }

@@ -103,6 +103,26 @@ public sealed class PipSource(IToolResolver resolver, IProcessRunner runner) : P
 
     public override bool SupportsCacheClear => true;
 
+    public override async Task<IReadOnlyDictionary<string, UpdateVerification>> VerifyAsync(
+        IReadOnlyList<UpdateRequest> requests, ToolContext context, CancellationToken cancellationToken = default)
+    {
+        var result = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
+            Arguments(context, "list", "--format", "json", "--disable-pip-version-check"), context.Environment,
+            TimeSpan.FromMinutes(2)), cancellationToken: cancellationToken);
+        if (!result.Success) throw SourceSupport.CommandFailure("pip installed inventory", result);
+        try
+        {
+            var installed = JsonSerializer.Deserialize<List<PipEntry>>(result.StdOut)
+                ?? throw new JsonException("No installed inventory was returned.");
+            return requests.ToDictionary(r => r.Identity, r => VerifyInstalled(installed.FirstOrDefault(p =>
+                NormalizeName(p.Name) == NormalizeName(r.PackageId))?.Version, r), StringComparer.OrdinalIgnoreCase);
+        }
+        catch (JsonException ex) { throw new SourceException(SourceIssueKind.Verification, $"pip inventory could not be read: {ex.Message}"); }
+    }
+
+    private static string NormalizeName(string? name) =>
+        System.Text.RegularExpressions.Regex.Replace(name ?? "", "[-_.]+", "-").ToLowerInvariant();
+
     public override async Task<string> ClearCacheAsync(ToolContext context,
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
     {
@@ -113,7 +133,7 @@ public sealed class PipSource(IToolResolver resolver, IProcessRunner runner) : P
         return "Cleared the pip download cache.";
     }
 
-    public override async Task UpdateAsync(UpdateRequest request, ToolContext context,
+    public override async Task<UpdateResult> UpdateAsync(UpdateRequest request, ToolContext context,
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
     {
         Validate(request);
@@ -133,6 +153,7 @@ public sealed class PipSource(IToolResolver resolver, IProcessRunner runner) : P
                 $"installed dependent package(s): {names}. No packages were changed; review the command log for the constraints.");
         }
         if (!result.Success) throw SourceSupport.CommandFailure("pip install", result);
+        return new();
     }
 
     private async Task<IReadOnlyList<PipDependent>> FindInstalledDependentsAsync(string packageId,

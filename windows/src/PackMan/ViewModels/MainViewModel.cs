@@ -16,6 +16,11 @@ public partial class MainViewModel : ObservableObject
     private readonly ISettingsService _settings;
     private readonly ISourceInstaller _installer;
     private readonly IAppUpdateService? _updater;
+    private readonly IUpdateHistoryStore _history;
+    private readonly ICacheInspector? _cacheInspector;
+    private readonly IPackageMetadataService? _metadata;
+    private readonly Dictionary<SourceId, int> _detectedBySource = [];
+    private readonly Dictionary<SourceId, int> _ignoredBySource = [];
     private CancellationTokenSource? _operationCts;
     private Task? _activeTask;
     private long _nextLogId;
@@ -23,12 +28,19 @@ public partial class MainViewModel : ObservableObject
     private readonly Dictionary<string, string> _lastOutput = [];
 
     public MainViewModel(IEnumerable<IPackageSource> sources, ISettingsService settings,
-        ISourceInstaller installer, IAppUpdateService? updater = null)
+        ISourceInstaller installer, IAppUpdateService? updater = null, IUpdateHistoryStore? history = null,
+        ICacheInspector? cacheInspector = null, IPackageMetadataService? metadata = null)
     {
         _sources = sources.ToList();
         _settings = settings;
         _installer = installer;
         _updater = updater;
+        _history = history ?? new UpdateHistoryStore(null);
+        _cacheInspector = cacheInspector;
+        _metadata = metadata;
+        CacheOptions = new(_sources.Where(s => s.SupportsCacheClear).Select(s => new CacheOptionViewModel(s)));
+        _includeUnknownVersions = settings.IncludeUnknownVersions;
+        foreach (var entry in _history.Read()) HistoryEntries.Add(entry);
         SourceOptions = new(_sources.Select(source => new SourceOptionViewModel(
             source, settings.IsSourceEnabled(source.Id), settings.GetExecutableOverride(source.Descriptor.ToolId),
             installer.HasPlan(source.Id))));
@@ -37,6 +49,7 @@ public partial class MainViewModel : ObservableObject
         PackagesView.SortDescriptions.Add(new SortDescription(nameof(PackageUpdate.Source), ListSortDirection.Ascending));
         PackagesView.SortDescriptions.Add(new SortDescription(nameof(PackageUpdate.Name), ListSortDirection.Ascending));
         if (settings.LoadIssue is { } issue) AppendLog(issue, LogLevel.Warning);
+        if (_history.LoadIssue is { } historyIssue) AppendLog(historyIssue, LogLevel.Warning);
     }
 
     public ObservableCollection<PackageUpdate> Packages { get; } = [];
@@ -44,6 +57,14 @@ public partial class MainViewModel : ObservableObject
     public ObservableCollection<LogEntry> LogEntries { get; } = [];
     public ObservableCollection<SourceOptionViewModel> SourceOptions { get; }
     public ObservableCollection<string> IgnoredUpdates { get; } = [];
+    public ObservableCollection<UpdateHistoryEntry> HistoryEntries { get; } = [];
+    public ObservableCollection<CacheOptionViewModel> CacheOptions { get; }
+    public int DetectedCount => _detectedBySource.Values.Sum();
+    public int IgnoredCount => _ignoredBySource.Values.Sum();
+    public bool HasUpdateSummary => UpdateSummary is not null;
+    public string UpdateSummaryText => UpdateSummary?.DisplayText ?? string.Empty;
+    [ObservableProperty] private bool _includeUnknownVersions;
+    [ObservableProperty] private PackageUpdate? _selectedPackage;
     public bool HasIgnoredUpdates => IgnoredUpdates.Count > 0;
 
     [ObservableProperty] private AppOperationKind _operation = AppOperationKind.Idle;
@@ -82,8 +103,11 @@ public partial class MainViewModel : ObservableObject
             ? $"v{version.Major}.{version.Minor}" + (version.Build > 0 ? $".{version.Build}" : string.Empty)
             : string.Empty;
     public string FooterText => $"{UpdateCount} update{(UpdateCount == 1 ? "" : "s")} • {SelectedCount} selected"
+        + $" • {IgnoredCount} ignored"
         + (LastScanCompletedAt is { } scannedAt ? $" • Last scan {scannedAt:HH:mm}" : string.Empty);
-    public string StatusText => Operation == AppOperationKind.CleaningCache
+    public string StatusText => Operation == AppOperationKind.InspectingPackage ? "Loading package details…"
+        : Operation == AppOperationKind.InspectingCache ? "Inspecting package caches…"
+        : Operation == AppOperationKind.CleaningCache
         ? CacheCleanupStatus ?? "Clearing package caches…"
         : Operation == AppOperationKind.UpdatingApp
         ? $"Installing PackMan {AvailableUpdate?.Version}…"
@@ -94,7 +118,8 @@ public partial class MainViewModel : ObservableObject
             ScanSummaryKind.UpdatesAvailable => $"{UpdateCount} update{(UpdateCount == 1 ? "" : "s")} available.",
             ScanSummaryKind.UpdatesCompleted => UpdateSummary is null ? "Updates completed." :
                 $"Updated {UpdateSummary.Updated}; failed {UpdateSummary.Failed + UpdateSummary.VerificationFailed}.",
-            ScanSummaryKind.UpToDate => "System is up to date. Every enabled source completed successfully.",
+            ScanSummaryKind.UpToDate => "Selected sources are up to date. Every enabled source completed successfully.",
+            ScanSummaryKind.IgnoredOnly => $"No actionable updates; {IgnoredCount} ignored.",
             ScanSummaryKind.CompletedWithIssues => $"Scan completed with issues; {UpdateCount} update{(UpdateCount == 1 ? "" : "s")} found.",
             ScanSummaryKind.AllUnavailable => "No enabled source could be scanned.",
             ScanSummaryKind.NoSources => "No sources selected.",
@@ -106,7 +131,8 @@ public partial class MainViewModel : ObservableObject
         ScanSummaryKind.NotStarted => "Ready to Scan",
         ScanSummaryKind.Running => "Scanning Sources",
         ScanSummaryKind.UpdatesCompleted => "Updates Completed",
-        ScanSummaryKind.UpToDate => "System is Up to Date",
+        ScanSummaryKind.UpToDate => "Selected Sources Are Up to Date",
+        ScanSummaryKind.IgnoredOnly => "Updates Are Ignored",
         ScanSummaryKind.CompletedWithIssues => "Scan Completed with Issues",
         ScanSummaryKind.AllUnavailable => "No Sources Could Be Scanned",
         ScanSummaryKind.NoSources => "No Sources Selected",
@@ -119,6 +145,7 @@ public partial class MainViewModel : ObservableObject
         ScanSummaryKind.Running => "Updates appear as each source completes.",
         ScanSummaryKind.UpdatesCompleted => "The selected packages were updated and verified.",
         ScanSummaryKind.UpToDate => "Every enabled source completed successfully.",
+        ScanSummaryKind.IgnoredOnly => $"{IgnoredCount} detected update(s) are hidden by ignore rules. Manage them in Sources.",
         ScanSummaryKind.CompletedWithIssues => "Some sources could not be checked, so these results may be incomplete.",
         ScanSummaryKind.AllUnavailable => "Open Sources to review executable paths and installation guidance.",
         ScanSummaryKind.NoSources => "Enable at least one package manager in Sources.",
@@ -207,6 +234,8 @@ public partial class MainViewModel : ObservableObject
             package.PropertyChanged -= OnPackageChanged;
             Packages.Remove(package);
             PackagesView.Refresh();
+            _ignoredBySource[package.SourceId] = _ignoredBySource.GetValueOrDefault(package.SourceId) + 1;
+            DeriveScanSummary();
             OnPropertyChanged(nameof(HasIgnoredUpdates));
             AppendLog($"Ignored {package.Name}{(versioned ? $" {package.AvailableVersion}" : "")}; it will stay hidden.");
         }
@@ -390,18 +419,24 @@ public partial class MainViewModel : ObservableObject
     private void ClearCache()
     {
         if (IsBusy) return;
-        var sources = _sources.Where(source => source.SupportsCacheClear).ToList();
+        var selected = CacheOptions.Where(item => item.IsSelected).ToList();
+        var sources = selected.Select(item => item.Source).ToList();
         if (sources.Count == 0)
         {
-            CacheCleanupStatus = "No package-manager caches are available to clear.";
+            CacheCleanupStatus = "Select at least one package-manager cache to clear.";
             return;
         }
-        const string confirmation =
-            "Clear downloaded installers and package caches for every available source?\n\n" +
-            "Future installs may need to download these files again. Clearing the NuGet cache also means " +
-            "projects may need to restore their packages again.";
-        if (!ConfirmCacheClear(confirmation)) return;
-        StartOperation(ct => RunCacheCleanupAsync(sources, ct));
+        StartOperation(async ct =>
+        {
+            Operation = AppOperationKind.InspectingCache;
+            if (_cacheInspector is not null) await InspectCachesAsync(selected, ct);
+            ct.ThrowIfCancellationRequested();
+            var confirmation = "Clear these selected caches?\n\n" + string.Join("\n\n", selected.Select(item =>
+                $"{item.Name}: {item.Scope}\n{item.PreviewText.Split('\n')[0]}"))
+                + "\n\nFiles are downloaded again when needed. Shared cache estimates must not be added together.";
+            if (!ConfirmCacheClear(confirmation)) return;
+            await RunCacheCleanupAsync(sources, ct);
+        });
     }
 
     private async Task RunCacheCleanupAsync(IReadOnlyList<IPackageSource> sources,
@@ -418,7 +453,15 @@ public partial class MainViewModel : ObservableObject
 
         foreach (var source in sources)
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            if (cancellationToken.IsCancellationRequested)
+            {
+                foreach (var remaining in sources.Skip(OperationCompleted))
+                    CacheOptions.First(i => i.Id == remaining.Id).ResultText = "Not started (cancelled).";
+                CacheCleanupStatus = $"Cache cleanup cancelled after {cleared} source(s).";
+                return;
+            }
+            var cacheItem = CacheOptions.First(i => i.Id == source.Id);
+            cacheItem.ResultText = "Clearing…";
             CurrentItem = source.Name;
             CacheCleanupStatus = $"Clearing {source.Name} ({OperationCompleted + 1}/{OperationTotal})…";
             try
@@ -431,6 +474,7 @@ public partial class MainViewModel : ObservableObject
                     if (!probe.IsAvailable)
                     {
                         skipped++;
+                        cacheItem.ResultText = "Skipped: " + (probe.Issue?.Message ?? "Unavailable");
                         AppendLog($"Cache cleanup skipped — {probe.Issue?.Message ?? "source is unavailable"}.",
                             LogLevel.Warning, source.Name);
                         continue;
@@ -448,16 +492,22 @@ public partial class MainViewModel : ObservableObject
                     if (line.Length > 0) AppendLog(line, LogLevel.Output, source.Name, output.Stream);
                 });
                 var result = await source.ClearCacheAsync(context, progress, cancellationToken);
+                cacheItem.ResultText = result;
+                cacheItem.PreviewText = "Cache changed; preview again for a fresh estimate.";
                 cleared++;
                 AppendLog(result, LogLevel.Success, source.Name);
             }
             catch (ElevationDeclinedException ex)
             {
                 failed++;
+                cacheItem.ResultText = ex.Message;
                 AppendLog(ex.Message, LogLevel.Warning, source.Name);
             }
             catch (OperationCanceledException)
             {
+                cacheItem.ResultText = "Cleanup cancelled; some files may already have been removed.";
+                foreach (var remaining in sources.Skip(OperationCompleted + 1))
+                    CacheOptions.First(i => i.Id == remaining.Id).ResultText = "Not started (cancelled).";
                 CacheCleanupStatus = $"Cache cleanup cancelled after {cleared} source{(cleared == 1 ? "" : "s")}.";
                 AppendLog(CacheCleanupStatus, LogLevel.Warning);
                 return;
@@ -465,6 +515,7 @@ public partial class MainViewModel : ObservableObject
             catch (Exception ex)
             {
                 failed++;
+                cacheItem.ResultText = "Failed: " + ex.Message;
                 AppendLog($"Cache cleanup failed — {ex.Message}", LogLevel.Error, source.Name);
             }
             finally
@@ -570,10 +621,11 @@ public partial class MainViewModel : ObservableObject
         RefreshComputed();
     }
 
-    private void StartUpdates(IReadOnlyList<(PackageUpdate Package, bool Elevated)> packages)
+    private void StartUpdates(IReadOnlyList<(PackageUpdate Package, bool Elevated)> packages,
+        bool interactive = false, bool verifyOnly = false)
     {
         if (IsBusy || packages.Count == 0) return;
-        StartOperation(ct => RunUpdatesAsync(packages, ct));
+        StartOperation(ct => RunUpdatesAsync(packages, ct, interactive, verifyOnly));
     }
 
     private void StartOperation(Func<CancellationToken, Task> work)
@@ -585,9 +637,20 @@ public partial class MainViewModel : ObservableObject
         _activeTask = task.IsCompleted ? null : task;
     }
 
+    public async Task CancelAndWaitAsync()
+    {
+        var task = _activeTask;
+        if (task is null) return;
+        Operation = AppOperationKind.Cancelling;
+        _operationCts?.Cancel();
+        try { await task; }
+        catch (OperationCanceledException) { }
+    }
+
     private async Task RunOwnedAsync(Func<CancellationToken, Task> work, CancellationToken cancellationToken)
     {
         try { await work(cancellationToken); }
+        catch (OperationCanceledException) { AppendLog("Operation cancelled.", LogLevel.Warning); }
         catch (Exception ex) when (ex is not OperationCanceledException) { AppendLog(ex.Message, LogLevel.Error); }
         finally
         {
@@ -611,6 +674,8 @@ public partial class MainViewModel : ObservableObject
         UpdateSummary = null;
         if (fresh)
         {
+            _detectedBySource.Clear();
+            _ignoredBySource.Clear();
             Packages.Clear();
             foreach (var option in SourceOptions)
             {
@@ -735,20 +800,33 @@ public partial class MainViewModel : ObservableObject
         if (enabled.Count == 0) ScanSummary = ScanSummaryKind.NoSources;
         else if (enabled.All(o => o.State.Status == SourceScanStatus.Unavailable)) ScanSummary = ScanSummaryKind.AllUnavailable;
         else if (enabled.Any(o => o.State.HasIssue)) ScanSummary = ScanSummaryKind.CompletedWithIssues;
-        else ScanSummary = UpdateCount == 0 ? ScanSummaryKind.UpToDate : ScanSummaryKind.UpdatesAvailable;
+        else if (Packages.Any(p => !p.IsActionable)) ScanSummary = ScanSummaryKind.CompletedWithIssues;
+        else ScanSummary = UpdateCount > 0 ? ScanSummaryKind.UpdatesAvailable
+            : IgnoredCount > 0 ? ScanSummaryKind.IgnoredOnly : ScanSummaryKind.UpToDate;
         AppendLog($"Scan complete. {UpdateCount} update(s) found.", HasSourceIssues ? LogLevel.Warning : LogLevel.Info);
         RefreshComputed();
     }
 
     private async Task RunUpdatesAsync(IReadOnlyList<(PackageUpdate Package, bool Elevated)> selected,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, bool interactive = false, bool verifyOnly = false)
     {
         Operation = AppOperationKind.Updating;
+        UpdateSummary = null;
         OperationCompleted = 0;
         OperationTotal = selected.Count;
         IsLogVisible = true;
-        AppendLog($"Updating {selected.Count} selected package(s).");
+        AppendLog($"{(verifyOnly ? "Verifying" : "Updating")} {selected.Count} selected package(s).");
         var updated = 0; var failed = 0; var cancelled = 0; var verificationFailed = 0;
+        var runId = Guid.NewGuid();
+        var history = selected.ToDictionary(i => i.Package.Id, i => new UpdateHistoryEntry(
+            Guid.NewGuid(), runId, DateTimeOffset.Now, null, i.Package.SourceId, i.Package.PackageId,
+            i.Package.Name, i.Package.Repository, i.Package.CurrentVersion, i.Package.AvailableVersion,
+            null, HistoryOutcome.NotStarted, i.Package.Restart, null, null, i.Package.ToolPath, ""));
+        foreach (var entry in history.Values) SaveHistory(entry);
+        var attempted = new HashSet<string>();
+        var succeeded = new HashSet<string>();
+        var verificationOnly = new HashSet<string>();
+        var installedVersions = new Dictionary<string, string?>();
         var batches = new List<VerificationBatch>();
         foreach (var group in selected.GroupBy(item => item.Package.SourceId))
         {
@@ -756,22 +834,33 @@ public partial class MainViewModel : ObservableObject
             foreach (var item in group)
             {
                 var package = item.Package;
-                if (cancellationToken.IsCancellationRequested) { cancelled++; break; }
+                if (cancellationToken.IsCancellationRequested) break;
+                attempted.Add(package.Id);
+                SaveHistory(history[package.Id] with { Outcome = HistoryOutcome.Running });
                 CurrentItem = package.Name;
-                var request = package.ToRequest(item.Elevated);
-                if (package.NeedsVerificationOnly)
+                var request = package.ToRequest(item.Elevated, interactive);
+                if (verifyOnly || package.NeedsVerificationOnly)
                 {
+                    verificationOnly.Add(package.Id);
                     package.Status = UpdateStatus.Verifying;
                     items.Add((package, request));
                     continue;
                 }
                 package.Status = UpdateStatus.Updating;
                 package.StatusMessage = null;
+                package.CommandOutput = string.Empty;
+                _lastOutput.Remove($"{package.Id}|{ProcessOutputStream.StandardOutput}");
+                _lastOutput.Remove($"{package.Id}|{ProcessOutputStream.StandardError}");
+                package.Restart = RestartState.None;
+                package.VerificationEvidence = null;
                 package.CanRetryElevated = false;
                 var progress = new Progress<ProcessOutputEvent>(output => AppendOutput(package, output));
                 try
                 {
-                    await UpdateWithElevationRetryAsync(package, request, progress, cancellationToken);
+                    var installResult = await UpdateWithElevationRetryAsync(package, request, progress, cancellationToken);
+                    package.Restart = installResult.Restart;
+                    SaveHistory(history[package.Id] with { Outcome = HistoryOutcome.Running, Restart = package.Restart,
+                        Message = "Installation command completed; awaiting verification.", Output = package.CommandOutput });
                     package.Status = UpdateStatus.Verifying;
                     items.Add((package, request));
                 }
@@ -797,7 +886,9 @@ public partial class MainViewModel : ObservableObject
                 }
                 catch (OperationCanceledException)
                 {
-                    package.Status = UpdateStatus.Cancelled; package.IsSelected = true; cancelled++; break;
+                    package.Status = UpdateStatus.Cancelled; package.FailureKind = UpdateFailureKind.Update;
+                    package.StatusMessage = "Cancellation requested. Verify the installed state before retrying.";
+                    package.IsSelected = true; cancelled++; OperationCompleted++; break;
                 }
                 catch (Exception ex)
                 {
@@ -832,17 +923,25 @@ public partial class MainViewModel : ObservableObject
 
         foreach (var outcome in outcomes)
         {
-            foreach (var (package, _) in outcome.Batch.Items)
+            foreach (var (package, request) in outcome.Batch.Items)
             {
                 UpdateVerification? result = null;
-                if (outcome.Results?.TryGetValue(package.PackageId, out var found) == true) result = found;
+                if (outcome.Results?.TryGetValue(request.Identity, out var found) == true) result = found;
+                package.VerificationEvidence = result?.Evidence;
+                installedVersions[package.Id] = result?.InstalledVersion;
+                if (!string.IsNullOrWhiteSpace(result?.InstalledVersion)) package.CurrentVersion = result.InstalledVersion;
                 if (result?.IsSatisfied == true)
                 {
+                    package.Status = verificationOnly.Contains(package.Id) ? UpdateStatus.Verified : UpdateStatus.Updated;
+                    package.StatusMessage = result.Evidence;
                     if (!string.IsNullOrWhiteSpace(result.InstalledVersion)) package.CurrentVersion = result.InstalledVersion;
                     package.IsSelected = false;
                     Packages.Remove(package);
+                    package.PropertyChanged -= OnPackageChanged;
+                    succeeded.Add(package.Id);
                     updated++;
-                    AppendLog($"Updated to {package.CurrentVersion}.", LogLevel.Success, package.Name);
+                    AppendLog(result.InstalledVersion is { } installed ? $"Installed version verified: {installed}."
+                        : result.Evidence ?? "No longer reported as outdated; installed version not confirmed.", LogLevel.Success, package.Name);
                 }
                 else if (outcome.Results is not null)
                 {
@@ -852,18 +951,19 @@ public partial class MainViewModel : ObservableObject
                         package.AvailableVersion = info.AvailableVersion;
                     }
                     package.Status = UpdateStatus.Failed;
-                    package.FailureKind = UpdateFailureKind.Update;
-                    package.StatusMessage = "The package is still outdated after the update command completed.";
+                    package.FailureKind = result?.StillOutdated is null ? UpdateFailureKind.Verification : UpdateFailureKind.Update;
+                    package.StatusMessage = result?.Evidence ?? "The requested installed version could not be confirmed.";
                     package.IsSelected = true;
-                    failed++;
+                    if (package.FailureKind == UpdateFailureKind.Verification) verificationFailed++; else failed++;
                 }
                 else
                 {
                     package.Status = UpdateStatus.Failed;
                     package.FailureKind = UpdateFailureKind.Verification;
+                    var prefix = verificationOnly.Contains(package.Id) ? "" : "The update command completed, but ";
                     package.StatusMessage = outcome.Cancelled
-                        ? "The update command completed, but verification was cancelled."
-                        : $"The update command completed, but verification failed: {outcome.Error?.Message}";
+                        ? $"{prefix}Verification was cancelled."
+                        : $"{prefix}Verification failed: {outcome.Error?.Message}";
                     package.IsSelected = true;
                     verificationFailed++;
                 }
@@ -873,7 +973,20 @@ public partial class MainViewModel : ObservableObject
                 AppendLog($"Verification failed — {outcome.Error.Message}", LogLevel.Error,
                     outcome.Batch.Items[0].Package.Source);
         }
-        UpdateSummary = new(updated, failed, cancelled, verificationFailed);
+        foreach (var (package, _) in selected)
+        {
+            var didStart = attempted.Contains(package.Id);
+            var result = succeeded.Contains(package.Id) ? (verificationOnly.Contains(package.Id) ? HistoryOutcome.Verified : HistoryOutcome.Updated)
+                : !didStart ? HistoryOutcome.NotStarted
+                : package.Status == UpdateStatus.Cancelled ? HistoryOutcome.Cancelled
+                : package.NeedsVerificationOnly ? HistoryOutcome.Unverified : HistoryOutcome.Failed;
+            SaveHistory(history[package.Id] with { FinishedAt = DateTimeOffset.Now, Outcome = result,
+                InstalledVersion = installedVersions.GetValueOrDefault(package.Id), Restart = package.Restart,
+                Evidence = package.VerificationEvidence, Message = package.StatusMessage, Output = package.CommandOutput });
+        }
+        var verified = verificationOnly.Count(succeeded.Contains);
+        UpdateSummary = new(updated - verified, failed, cancelled, verificationFailed, selected.Count - attempted.Count,
+            selected.Count(i => i.Package.Restart != RestartState.None), verified);
         ScanSummary = HasSourceIssues ? ScanSummaryKind.CompletedWithIssues
             : UpdateCount == 0 ? ScanSummaryKind.UpdatesCompleted : ScanSummaryKind.UpdatesAvailable;
         AppendLog(cancellationToken.IsCancellationRequested ? "Update run cancelled." : "Update run finished.",
@@ -881,12 +994,12 @@ public partial class MainViewModel : ObservableObject
         RefreshComputed();
     }
 
-    private async Task UpdateWithElevationRetryAsync(PackageUpdate package, UpdateRequest request,
+    private async Task<UpdateResult> UpdateWithElevationRetryAsync(PackageUpdate package, UpdateRequest request,
         IProgress<ProcessOutputEvent> progress, CancellationToken cancellationToken)
     {
         try
         {
-            await package.SourceRef.UpdateAsync(request, package.ToolContext, progress, cancellationToken);
+            return await package.SourceRef.UpdateAsync(request, package.ToolContext, progress, cancellationToken);
         }
         catch (SourceException ex) when (!request.Elevated && ex.CanRetryElevated
             && !cancellationToken.IsCancellationRequested)
@@ -894,7 +1007,7 @@ public partial class MainViewModel : ObservableObject
             AppendLog("Retrying with administrator approval…", LogLevel.Warning, package.Name);
             try
             {
-                await package.SourceRef.UpdateAsync(request with { Elevated = true },
+                return await package.SourceRef.UpdateAsync(request with { Elevated = true },
                     package.ToolContext, progress, cancellationToken);
             }
             catch (SourceException elevatedEx) when (elevatedEx.CanRetryElevated)
@@ -910,6 +1023,8 @@ public partial class MainViewModel : ObservableObject
         RemovePackages(option.Id);
         var ignored = _settings.GetIgnoredUpdates();
         var visible = infos.Where(info => !IsIgnored(ignored, option.Id, info)).ToList();
+        _detectedBySource[option.Id] = infos.Count;
+        _ignoredBySource[option.Id] = infos.Count - visible.Count;
         foreach (var info in visible)
         {
             var package = new PackageUpdate
@@ -922,9 +1037,12 @@ public partial class MainViewModel : ObservableObject
                 Source = option.Name,
                 CurrentVersion = info.CurrentVersion,
                 AvailableVersion = info.AvailableVersion,
-                Status = info.StatusMessage is null ? UpdateStatus.Pending : UpdateStatus.Failed,
-                FailureKind = info.StatusMessage is null ? null : UpdateFailureKind.Verification,
-                StatusMessage = info.StatusMessage,
+                Status = UpdateStatus.Pending,
+                ScanWarning = info.StatusMessage,
+                Repository = info.Repository,
+                HasExactIdentity = info.HasExactIdentity,
+                RequiresUnknownVersionConsent = info.RequiresUnknownVersionConsent,
+                AllowUnknownVersion = IncludeUnknownVersions,
             };
             package.PropertyChanged += OnPackageChanged;
             Packages.Add(package);
@@ -935,6 +1053,8 @@ public partial class MainViewModel : ObservableObject
 
     private void RemovePackages(SourceId sourceId)
     {
+        _detectedBySource.Remove(sourceId);
+        _ignoredBySource.Remove(sourceId);
         foreach (var package in Packages.Where(p => p.SourceId == sourceId).ToList())
         {
             package.PropertyChanged -= OnPackageChanged;
@@ -976,6 +1096,9 @@ public partial class MainViewModel : ObservableObject
         var key = $"{package.Id}|{output.Stream}";
         if (_lastOutput.GetValueOrDefault(key) == line) return;
         _lastOutput[key] = line;
+        package.CommandOutput += (output.Stream == ProcessOutputStream.StandardError ? "[stderr] " : "")
+            + line + Environment.NewLine;
+        if (package.CommandOutput.Length > 32000) package.CommandOutput = package.CommandOutput[^32000..];
         AppendLog(line, LogLevel.Output, package.Name, output.Stream);
     }
 
@@ -992,6 +1115,8 @@ public partial class MainViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(IsBusy));
         OnPropertyChanged(nameof(UpdateCount));
+        OnPropertyChanged(nameof(DetectedCount));
+        OnPropertyChanged(nameof(IgnoredCount));
         OnPropertyChanged(nameof(SelectedCount));
         OnPropertyChanged(nameof(CanUpdate));
         OnPropertyChanged(nameof(HasPackages));

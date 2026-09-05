@@ -79,7 +79,7 @@ public sealed class NpmSource(IToolResolver resolver, IProcessRunner runner) : P
         return "Cleared the npm cache.";
     }
 
-    public override async Task UpdateAsync(UpdateRequest request, ToolContext context,
+    public override async Task<UpdateResult> UpdateAsync(UpdateRequest request, ToolContext context,
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
     {
         Validate(request);
@@ -96,6 +96,27 @@ public sealed class NpmSource(IToolResolver resolver, IProcessRunner runner) : P
                 $"npm installed {request.PackageId} {request.TargetVersion} but blocked its install scripts, " +
                 "so the package may be left with a placeholder launcher that cannot run. Run " +
                 $"`npm config set allow-scripts={request.PackageId} --location=user` and update again.");
+        return new();
+    }
+
+    public override async Task<IReadOnlyDictionary<string, UpdateVerification>> VerifyAsync(
+        IReadOnlyList<UpdateRequest> requests, ToolContext context, CancellationToken cancellationToken = default)
+    {
+        var result = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
+            Arguments(context, "list", "-g", "--depth=0", "--json"), context.Environment,
+            TimeSpan.FromMinutes(2)), cancellationToken: cancellationToken);
+        if (!result.Success) throw SourceSupport.CommandFailure("npm installed inventory", result);
+        try
+        {
+            using var json = JsonDocument.Parse(result.StdOut);
+            if (json.RootElement.ValueKind != JsonValueKind.Object)
+                throw new JsonException("Expected an installed-package object.");
+            var hasDependencies = json.RootElement.TryGetProperty("dependencies", out var dependencies);
+            return requests.ToDictionary(r => r.Identity, r => VerifyInstalled(hasDependencies
+                && dependencies.TryGetProperty(r.PackageId, out var item)
+                && item.TryGetProperty("version", out var version) ? version.GetString() : null, r), StringComparer.OrdinalIgnoreCase);
+        }
+        catch (JsonException ex) { throw new SourceException(SourceIssueKind.Verification, $"npm inventory could not be read: {ex.Message}"); }
     }
 
     // npm 12 stopped running package install scripts unless the package is allowlisted. CLIs

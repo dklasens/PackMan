@@ -43,7 +43,7 @@ public abstract class PackageSourceBase(IToolResolver resolver, IProcessRunner r
 
     public abstract Task<SourceScanReport> ScanAsync(ToolContext context, IProgress<SourcePhase>? progress = null,
         CancellationToken cancellationToken = default);
-    public abstract Task UpdateAsync(UpdateRequest request, ToolContext context,
+    public abstract Task<UpdateResult> UpdateAsync(UpdateRequest request, ToolContext context,
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default);
 
     public virtual Task<string> ClearCacheAsync(ToolContext context,
@@ -57,12 +57,14 @@ public abstract class PackageSourceBase(IToolResolver resolver, IProcessRunner r
         if (report.Issues.Count > 0)
             throw new SourceException(SourceIssueKind.Verification,
                 string.Join("; ", report.Issues.Select(i => i.Message)));
-        var outstanding = report.Updates.ToDictionary(p => p.Id, StringComparer.OrdinalIgnoreCase);
         return requests.ToDictionary(
-            r => r.PackageId,
-            r => outstanding.TryGetValue(r.PackageId, out var package)
-                ? new UpdateVerification(false, StillOutdated: package)
-                : new UpdateVerification(true, r.TargetVersion),
+            r => r.Identity,
+            r => report.Updates.FirstOrDefault(p => p.Id.Equals(r.PackageId, StringComparison.OrdinalIgnoreCase)
+                && (r.Repository is null || string.Equals(p.Repository, r.Repository, StringComparison.OrdinalIgnoreCase))) is { } package
+                ? new UpdateVerification(false, package.CurrentVersion, package,
+                    "The source still reports an available update.")
+                : new UpdateVerification(true, Evidence:
+                    "No longer reported as outdated by the source. Installed version was not independently confirmed."),
             StringComparer.OrdinalIgnoreCase);
     }
 
@@ -87,6 +89,20 @@ public abstract class PackageSourceBase(IToolResolver resolver, IProcessRunner r
         if (!PackageIdValidator.IsValidVersion(request.TargetVersion))
             throw new SourceException(SourceIssueKind.Configuration,
                 $"Refusing to use invalid target version '{request.TargetVersion}'.");
+        if (request.Repository is not null && !PackageIdValidator.IsValid(request.Repository))
+            throw new SourceException(SourceIssueKind.Configuration, "The repository identity is invalid.");
+    }
+
+    protected static UpdateVerification VerifyInstalled(string? installed, UpdateRequest request)
+    {
+        var satisfied = installed is not null && (string.Equals(installed, request.TargetVersion,
+            StringComparison.OrdinalIgnoreCase) || SemanticVersion.Compare(installed, request.TargetVersion) is >= 0);
+        var outdated = installed is not null && SemanticVersion.Compare(installed, request.TargetVersion) is < 0
+            ? new PackageInfo(request.PackageId, request.Name, installed, request.TargetVersion, Repository: request.Repository)
+            : null;
+        return new(satisfied, installed, outdated, Evidence: installed is null
+            ? "The package was not found in the installed inventory."
+            : $"Installed inventory reports {installed}; requested {request.TargetVersion}.");
     }
 }
 

@@ -30,7 +30,7 @@ jobs:
       - run: dotnet build PackMan.sln --configuration Release --no-restore
       - name: Unit and integration tests
         run: dotnet test tests/PackMan.Tests/PackMan.Tests.csproj --configuration Release --no-build
-      - name: Verify self-contained publish
+      - name: Verify Windows publish
         run: dotnet publish src/PackMan/PackMan.csproj --configuration Release --no-build --no-restore --output dist/windows
       - name: WPF UI tests against published executable
         env:

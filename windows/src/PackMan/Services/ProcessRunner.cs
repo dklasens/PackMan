@@ -92,7 +92,7 @@ public sealed class ProcessRunner(IElevationBroker elevationBroker) : IProcessRu
         try
         {
             await process.WaitForExitAsync(linked.Token);
-            await Task.WhenAll(stdoutClosed.Task, stderrClosed.Task);
+            await Task.WhenAll(stdoutClosed.Task, stderrClosed.Task).WaitAsync(linked.Token);
         }
         catch (OperationCanceledException)
         {

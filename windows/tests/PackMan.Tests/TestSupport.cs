@@ -61,6 +61,7 @@ internal sealed class MemorySettings : ISettingsService
     private readonly Dictionary<SourceId, ToolContext> _contexts = [];
     private readonly HashSet<string> _ignored = new(StringComparer.OrdinalIgnoreCase);
     public string? LoadIssue => null;
+    public bool IncludeUnknownVersions { get; set; }
     public bool IsSourceEnabled(SourceId id) => !_disabled.Contains(id);
     public void SetSourceEnabled(SourceId id, bool enabled) { if (enabled) _disabled.Remove(id); else _disabled.Add(id); }
     public string? GetExecutableOverride(ToolId id) => _overrides.GetValueOrDefault(id);
@@ -139,8 +140,12 @@ internal sealed class StubSource(
         ?? Task.FromResult(SourceProbe.Available(new ToolContext("stub", "1", ToolResolutionOrigin.Custom, [])));
     public Task<SourceScanReport> ScanAsync(ToolContext context, IProgress<SourcePhase>? progress = null,
         CancellationToken cancellationToken = default) => Task.FromResult(report);
-    public Task UpdateAsync(UpdateRequest request, ToolContext context, IProgress<ProcessOutputEvent>? output = null,
-        CancellationToken cancellationToken = default) => update?.Invoke(request) ?? Task.CompletedTask;
+    public async Task<UpdateResult> UpdateAsync(UpdateRequest request, ToolContext context, IProgress<ProcessOutputEvent>? output = null,
+        CancellationToken cancellationToken = default)
+    {
+        await (update?.Invoke(request) ?? Task.CompletedTask);
+        return new();
+    }
     public Task<IReadOnlyDictionary<string, UpdateVerification>> VerifyAsync(IReadOnlyList<UpdateRequest> requests,
         ToolContext context, CancellationToken cancellationToken = default) => verify?.Invoke(requests)
         ?? Task.FromResult<IReadOnlyDictionary<string, UpdateVerification>>(

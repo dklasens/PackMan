@@ -10,7 +10,7 @@ on:
       tag:
         description: Existing release tag to attach assets to
         required: true
-        default: v1.8.0
+        default: v1.9
       platform:
         description: Platforms to build and publish
         type: choice
@@ -18,7 +18,7 @@ on:
           - macos
           - windows
           - both
-        default: macos
+        default: both
 
 permissions:
   contents: write
@@ -36,6 +36,8 @@ jobs:
         working-directory: macos/PackMan
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - name: Select Xcode 16.4
         run: sudo xcode-select --switch /Applications/Xcode_16.4.app/Contents/Developer
       - run: swift test --parallel
@@ -66,17 +68,30 @@ jobs:
         working-directory: windows
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
       - run: dotnet restore PackMan.sln
-      - run: dotnet build PackMan.sln --configuration Release --no-restore
+      - name: Build with release version
+        shell: pwsh
+        run: |
+          $tagVersion = [version]$env:RELEASE_TAG.TrimStart('v')
+          $version = '{0}.{1}.{2}' -f $tagVersion.Major, $tagVersion.Minor, [Math]::Max(0, $tagVersion.Build)
+          dotnet build PackMan.sln --configuration Release --no-restore /p:Version=$version
       - run: dotnet test tests/PackMan.Tests/PackMan.Tests.csproj --configuration Release --no-build
       - name: Publish Windows executable
         shell: pwsh
         run: |
-          $version = $env:RELEASE_TAG.TrimStart('v')
+          $tagVersion = [version]$env:RELEASE_TAG.TrimStart('v')
+          $version = '{0}.{1}.{2}' -f $tagVersion.Major, $tagVersion.Minor, [Math]::Max(0, $tagVersion.Build)
           dotnet publish src/PackMan/PackMan.csproj --configuration Release --no-build --no-restore --output dist/windows /p:Version=$version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $actual = (Get-Item dist/windows/PackMan.exe).VersionInfo.FileVersion
+          if ([version]$actual -ne [version]("{0}.{1}.{2}.0" -f ([version]$version).Major, ([version]$version).Minor, [Math]::Max(0, ([version]$version).Build))) {
+            throw "Packaged version $actual does not match release $version"
+          }
       - name: Test published Windows executable
         env:
           PACKMAN_UI_TEST_EXE: ${{ github.workspace }}\windows\dist\windows\PackMan.exe
@@ -85,7 +100,15 @@ jobs:
         shell: pwsh
         run: |
           Copy-Item dist/windows/PackMan.exe dist/PackMan-Windows-x64.exe
-          Compress-Archive -LiteralPath dist/windows/PackMan.exe -DestinationPath dist/PackMan-Windows-x64.zip -CompressionLevel Optimal
+          # Pre-1.9 standalone clients look up their own filename in the ZIP.
+          Compress-Archive -LiteralPath dist/windows/PackMan.exe, dist/PackMan-Windows-x64.exe -DestinationPath dist/PackMan-Windows-x64.zip -CompressionLevel Optimal
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path dist/PackMan-Windows-x64.zip))
+          try {
+            foreach ($name in 'PackMan.exe', 'PackMan-Windows-x64.exe') {
+              if ($null -eq $archive.GetEntry($name)) { throw "Missing update compatibility entry: $name" }
+            }
+          } finally { $archive.Dispose() }
           foreach ($file in 'PackMan-Windows-x64.exe', 'PackMan-Windows-x64.zip') {
             $hash = (Get-FileHash "dist/$file" -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $file" | Set-Content "dist/$file.sha256" -Encoding ascii
@@ -104,11 +127,13 @@ jobs:
     if: >-
       always()
       && (needs.macos.result == 'success' || needs.windows.result == 'success')
-      && needs.macos.result != 'failure'
-      && needs.windows.result != 'failure'
+      && (needs.macos.result == 'success' || needs.macos.result == 'skipped')
+      && (needs.windows.result == 'success' || needs.windows.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -121,6 +146,12 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" dist/* --clobber
           else
-            gh release create "$tag" dist/* \
-              --verify-tag --generate-notes --title "PackMan ${tag#v}"
+            notes=".github/release-notes/$tag.md"
+            if [ -f "$notes" ]; then
+              gh release create "$tag" dist/* \
+                --verify-tag --notes-file "$notes" --title "PackMan ${tag#v}" --latest
+            else
+              gh release create "$tag" dist/* \
+                --verify-tag --generate-notes --title "PackMan ${tag#v}" --latest
+            fi
           fi

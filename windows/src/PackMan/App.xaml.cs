@@ -39,6 +39,11 @@ public partial class App : Application
         services.AddSingleton<IProcessRunner, ProcessRunner>();
         services.AddSingleton<IToolResolver, ToolResolver>();
         services.AddSingleton<ISourceInstaller, SourceInstaller>();
+        services.AddSingleton<ICacheInspector>(provider => UiTestEnvironment.Scenario is null
+            ? new CacheInspector(provider.GetRequiredService<IProcessRunner>()) : new UiTestCacheInspector());
+        services.AddSingleton<IPackageMetadataService, PackageMetadataService>();
+        services.AddSingleton<IUpdateHistoryStore>(_ => new UpdateHistoryStore(
+            UiTestEnvironment.Scenario is null ? UpdateHistoryStore.DefaultPath : null));
         services.AddSingleton(_ => new HttpClient { Timeout = TimeSpan.FromSeconds(20) });
         if (UiTestEnvironment.Scenario is { } scenario)
         {

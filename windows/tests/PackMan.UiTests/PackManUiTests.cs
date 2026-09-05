@@ -79,12 +79,71 @@ public sealed class PackManUiTests
         Assert.NotNull(sources.FindFirstDescendant(cf => cf.ByAutomationId("clearCacheButton")));
     }
 
+    [Fact]
+    [Trait("Category", "UI")]
+    public void DetailsExposeIdentityAndVerificationAndHistoryShowsTheResult()
+    {
+        using var session = Launch("updates");
+        session.Button("scanCancelButton").Invoke();
+        Assert.True(WaitFor(() => session.Window.FindFirstDescendant(cf => cf.ByText("Alpha Tool")) is not null));
+        var table = session.Window.FindFirstDescendant(cf => cf.ByAutomationId("updatesTable"))!;
+        table.FindFirstDescendant(cf => cf.ByControlType(FlaUI.Core.Definitions.ControlType.DataItem))!
+            .Patterns.SelectionItem.Pattern.Select();
+        session.Button("detailsButton").Invoke();
+        Window? details = null;
+        Assert.True(WaitFor(() =>
+        {
+            details = session.Application.GetAllTopLevelWindows(session.Automation).FirstOrDefault(w =>
+                w.FindFirstDescendant(cf => cf.ByAutomationId("packageDetailId")) is not null);
+            return details is not null;
+        }));
+        Assert.Equal("alpha", details!.FindFirstDescendant(cf => cf.ByAutomationId("packageDetailId"))!.AsTextBox().Text);
+        Capture(details, "package-details.png");
+        details.FindFirstDescendant(cf => cf.ByAutomationId("verifyAgainButton"))!.AsButton().Invoke();
+        Assert.True(WaitFor(() => table.FindFirstDescendant(cf => cf.ByText("Alpha Tool")) is null));
+        details.FindFirstDescendant(cf => cf.ByText("History").And(cf.ByControlType(FlaUI.Core.Definitions.ControlType.TabItem)))!
+            .Patterns.SelectionItem.Pattern.Select();
+        Assert.True(WaitFor(() => details.FindFirstDescendant(cf => cf.ByText("Verified")) is not null));
+        details.FindFirstDescendant(cf => cf.ByAutomationId("historyTable"))!
+            .FindFirstDescendant(cf => cf.ByControlType(FlaUI.Core.Definitions.ControlType.DataItem))!
+            .Patterns.SelectionItem.Pattern.Select();
+        Assert.True(WaitFor(() => details.FindAllDescendants().Any(e => e.Name.Contains("requested 2.0.0"))));
+        Capture(details, "update-history.png");
+    }
+
+    [Fact]
+    [Trait("Category", "UI")]
+    public void SourcesPreviewShowsTheSelectedCacheSize()
+    {
+        using var session = Launch("updates");
+        session.Button("sourcesButton").Invoke();
+        Window? sources = null;
+        Assert.True(WaitFor(() =>
+        {
+            sources = session.Application.GetAllTopLevelWindows(session.Automation).FirstOrDefault(w =>
+                w.FindFirstDescendant(cf => cf.ByAutomationId("previewCachesButton")) is not null);
+            return sources is not null;
+        }));
+        sources!.FindFirstDescendant(cf => cf.ByAutomationId("previewCachesButton"))!.AsButton().Invoke();
+        Assert.True(WaitFor(() => sources.FindAllDescendants().Any(e => e.Name.Contains("About 2.0 MB"))));
+        sources.FindFirstDescendant(cf => cf.ByAutomationId("sourcesScroll"))!
+            .Patterns.Scroll.Pattern.SetScrollPercent(-1, 100);
+        Capture(sources, "cache-preview.png");
+    }
+
+    private static void Capture(Window window, string fileName)
+    {
+        if (Environment.GetEnvironmentVariable("PACKMAN_UI_SCREENSHOT_DIR") is not { Length: > 0 } directory) return;
+        Thread.Sleep(300); // Allow the WPF dispatcher to finish layout and its queued offscreen render.
+        Assert.True(WaitFor(() => File.Exists(Path.Combine(directory, fileName))), "The WPF render was not produced.");
+    }
+
     private static UiSession Launch(string scenario)
     {
         var executable = Environment.GetEnvironmentVariable("PACKMAN_UI_TEST_EXE");
         if (string.IsNullOrWhiteSpace(executable))
             executable = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
-                "..", "..", "..", "..", "..", "src", "PackMan", "bin", "Release", "net8.0-windows", "win-x64", "PackMan.exe"));
+                "..", "..", "..", "..", "..", "src", "PackMan", "bin", "Release", "net10.0-windows", "win-x64", "PackMan.exe"));
         Assert.True(File.Exists(executable), $"PackMan executable was not found at {executable}");
         var start = new ProcessStartInfo(executable);
         start.ArgumentList.Add("--ui-test-scenario");

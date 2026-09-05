@@ -24,6 +24,8 @@ public sealed class AppUpdateService(HttpClient httpClient, ISettingsService set
     internal const string ChecksumAssetName = ZipAssetName + ".sha256";
     private static readonly TimeSpan CheckThrottle = TimeSpan.FromHours(24);
     private static readonly TimeSpan DownloadTimeout = TimeSpan.FromMinutes(10);
+    internal string ExecutablePath { get; set; } = Environment.ProcessPath
+        ?? throw new InvalidOperationException("The PackMan executable path is unavailable.");
 
     internal static Version CurrentVersion { get; } =
         typeof(AppUpdateService).Assembly.GetName().Version ?? new Version(0, 0);
@@ -77,8 +79,7 @@ public sealed class AppUpdateService(HttpClient httpClient, ISettingsService set
 
     public async Task ApplyAsync(AppUpdateInfo update, IProgress<string>? progress, CancellationToken cancellationToken)
     {
-        var executable = Environment.ProcessPath
-            ?? throw new InvalidOperationException("The PackMan executable path is unavailable.");
+        var executable = ExecutablePath;
         var targetDirectory = Path.GetDirectoryName(Path.GetFullPath(executable))!;
         var stagingRoot = Path.Combine(Path.GetTempPath(), "PackMan", "update");
         try { if (Directory.Exists(stagingRoot)) Directory.Delete(stagingRoot, recursive: true); }
@@ -95,9 +96,9 @@ public sealed class AppUpdateService(HttpClient httpClient, ISettingsService set
         progress?.Report("Extracting the update…");
         var stagedDirectory = Path.Combine(stagingRoot, "staged");
         ZipFile.ExtractToDirectory(zipPath, stagedDirectory, true);
-        var stagedExecutable = Path.Combine(stagedDirectory, Path.GetFileName(executable));
+        var stagedExecutable = Path.Combine(stagedDirectory, "PackMan.exe");
         if (!File.Exists(stagedExecutable))
-            throw new InvalidOperationException($"The release archive does not contain {Path.GetFileName(executable)}.");
+            throw new InvalidOperationException("The release archive does not contain PackMan.exe.");
 
         var requiresElevation = !CanWriteToDirectory(targetDirectory);
         progress?.Report(requiresElevation
@@ -344,8 +345,21 @@ public static class UpdateApplier
         // the session, which the app otherwise never does without asking. Going through Explorer
         // re-parents the launch to the shell, which runs at the user's own integrity level.
         // Explorer reports nothing back, so fall back to a direct start if nothing comes up.
-        if (ProcessRunner.IsCurrentProcessElevated && TryRelaunchViaShell(executable)) return;
-        Process.Start(new ProcessStartInfo(executable) { UseShellExecute = true });
+        RelaunchSafely(executable, ProcessRunner.IsCurrentProcessElevated, TryRelaunchViaShell,
+            path => Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }));
+    }
+
+    internal static void RelaunchSafely(string executable, bool elevated,
+        Func<string, bool> shellLaunch, Action<string> directLaunch, Action<string>? notice = null)
+    {
+        if (!elevated) { directLaunch(executable); return; }
+        if (shellLaunch(executable)) return;
+        var message = "PackMan was updated, but could not restart as your normal Windows user. "
+            + "Open PackMan again from its usual location.";
+        LogFailure(new InvalidOperationException(message));
+        if (notice is not null) notice(message);
+        else System.Windows.MessageBox.Show(message, "PackMan update", System.Windows.MessageBoxButton.OK,
+            System.Windows.MessageBoxImage.Information);
     }
 
     private static bool TryRelaunchViaShell(string executable)

@@ -32,6 +32,29 @@ public sealed class ScoopSource(IToolResolver resolver, IProcessRunner runner) :
 
     public override bool SupportsCacheClear => true;
 
+    public override async Task<IReadOnlyDictionary<string, UpdateVerification>> VerifyAsync(
+        IReadOnlyList<UpdateRequest> requests, ToolContext context, CancellationToken cancellationToken = default)
+    {
+        var result = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
+            Arguments(context, "list"), context.Environment, TimeSpan.FromMinutes(1)), cancellationToken: cancellationToken);
+        if (!result.Success) throw SourceSupport.CommandFailure("Scoop installed inventory", result);
+        var installed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var inTable = false;
+        foreach (var raw in result.StdOut.Split('\n'))
+        {
+            var line = Regex.Replace(raw, @"\x1B\[[0-9;?]*[A-Za-z]", "").Trim();
+            if (line.StartsWith("Name", StringComparison.OrdinalIgnoreCase) && line.Contains("Version")) { inTable = true; continue; }
+            if (!inTable || string.IsNullOrEmpty(line) || line.All(c => c is '-' or ' ')) continue;
+            var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2 || !PackageIdValidator.IsValid(parts[0]) || !PackageIdValidator.IsValidVersion(parts[1]))
+                throw new SourceException(SourceIssueKind.Verification, "Scoop returned an unrecognized installed-package record.");
+            installed[parts[0]] = parts[1];
+        }
+        if (!inTable) throw new SourceException(SourceIssueKind.Verification, "Scoop's installed inventory was not recognized.");
+        return requests.ToDictionary(r => r.Identity, r => VerifyInstalled(installed.GetValueOrDefault(r.PackageId), r),
+            StringComparer.OrdinalIgnoreCase);
+    }
+
     public override async Task<string> ClearCacheAsync(ToolContext context,
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
     {
@@ -53,7 +76,7 @@ public sealed class ScoopSource(IToolResolver resolver, IProcessRunner runner) :
         return new(parsed.Updates, parsed.Issues);
     }
 
-    public override async Task UpdateAsync(UpdateRequest request, ToolContext context,
+    public override async Task<UpdateResult> UpdateAsync(UpdateRequest request, ToolContext context,
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
     {
         Validate(request);
@@ -61,6 +84,7 @@ public sealed class ScoopSource(IToolResolver resolver, IProcessRunner runner) :
             Arguments(context, "update", request.PackageId), context.Environment, TimeSpan.FromMinutes(15), request.Elevated),
             output, cancellationToken);
         if (!result.Success) throw SourceSupport.CommandFailure("scoop update", result);
+        return new();
     }
 }
 

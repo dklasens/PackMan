@@ -103,11 +103,15 @@ public sealed class AppUpdateTests
         Assert.Equal(NewerVersion, (await service.CheckAsync(force: true))!.Version);
     }
 
-    [Fact]
-    public async Task ApplyStagesVerifiedExecutableAndLaunchesHelper()
+    [Theory]
+    [InlineData("PackMan.exe")]
+    [InlineData("PackMan-Windows-x64.exe")]
+    [InlineData("My updater.exe")]
+    public async Task ApplyStagesVerifiedExecutableAndLaunchesHelper(string executableName)
     {
         var (client, payload) = BuildReleaseClient();
         var service = new AppUpdateService(client, new MemorySettings());
+        service.ExecutablePath = Path.Combine(Path.GetTempPath(), executableName);
         (int Pid, string Staged, string Target, string Root, bool Elevated)? launch = null;
         service.LaunchApplyHelper = (pid, staged, target, root, elevated) =>
         {
@@ -121,7 +125,8 @@ public sealed class AppUpdateTests
         Assert.NotNull(launch);
         var started = launch!.Value;
         Assert.Equal(Environment.ProcessId, started.Pid);
-        Assert.Equal(Environment.ProcessPath, started.Target);
+        Assert.Equal(service.ExecutablePath, started.Target);
+        Assert.Equal("PackMan.exe", Path.GetFileName(started.Staged));
         Assert.True(File.Exists(started.Staged));
         Assert.Equal(payload, File.ReadAllBytes(started.Staged));
         var stagingRoot = Path.Combine(Path.GetTempPath(), "PackMan", "update");
@@ -383,7 +388,7 @@ public sealed class AppUpdateTests
         using var zipStream = new MemoryStream();
         using (var archive = new ZipArchive(zipStream, ZipArchiveMode.Create, leaveOpen: true))
         {
-            var entry = archive.CreateEntry(Path.GetFileName(Environment.ProcessPath ?? "PackMan.exe"));
+            var entry = archive.CreateEntry("PackMan.exe");
             using var entryStream = entry.Open();
             entryStream.Write(payload);
         }

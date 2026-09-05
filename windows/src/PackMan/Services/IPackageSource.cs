@@ -58,7 +58,10 @@ public sealed record PackageInfo(
     string Name,
     string CurrentVersion,
     string AvailableVersion,
-    string? StatusMessage = null);
+    string? StatusMessage = null,
+    string? Repository = null,
+    bool HasExactIdentity = true,
+    bool RequiresUnknownVersionConsent = false);
 
 public sealed record SourceScanReport(
     IReadOnlyList<PackageInfo> Updates,
@@ -67,8 +70,15 @@ public sealed record SourceScanReport(
     public static SourceScanReport Empty { get; } = new([], []);
 }
 
-public sealed record UpdateRequest(string PackageId, string Name, string TargetVersion, bool Elevated = false);
-public sealed record UpdateVerification(bool IsSatisfied, string? InstalledVersion = null, PackageInfo? StillOutdated = null);
+public sealed record UpdateRequest(string PackageId, string Name, string TargetVersion, bool Elevated = false,
+    string? Repository = null, bool AllowUnknownVersion = false, bool Interactive = false)
+{
+    public string Identity => Repository is null ? PackageId : $"{Repository}:{PackageId}";
+}
+public enum RestartState { None, Required, Initiated }
+public sealed record UpdateResult(RestartState Restart = RestartState.None, int ExitCode = 0);
+public sealed record UpdateVerification(bool IsSatisfied, string? InstalledVersion = null,
+    PackageInfo? StillOutdated = null, string? Evidence = null);
 
 public interface IPackageSource
 {
@@ -79,7 +89,7 @@ public interface IPackageSource
     Task<SourceProbe> ProbeAsync(CancellationToken cancellationToken = default);
     Task<SourceScanReport> ScanAsync(ToolContext context, IProgress<SourcePhase>? progress = null,
         CancellationToken cancellationToken = default);
-    Task UpdateAsync(UpdateRequest request, ToolContext context,
+    Task<UpdateResult> UpdateAsync(UpdateRequest request, ToolContext context,
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default);
     Task<IReadOnlyDictionary<string, UpdateVerification>> VerifyAsync(
         IReadOnlyList<UpdateRequest> requests, ToolContext context, CancellationToken cancellationToken = default);

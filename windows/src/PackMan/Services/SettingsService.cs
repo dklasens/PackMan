@@ -5,6 +5,7 @@ namespace PackMan.Services;
 public interface ISettingsService
 {
     string? LoadIssue { get; }
+    bool IncludeUnknownVersions { get; set; }
     bool IsSourceEnabled(SourceId id);
     void SetSourceEnabled(SourceId id, bool enabled);
     string? GetExecutableOverride(ToolId id);
@@ -27,6 +28,11 @@ public sealed class SettingsService : ISettingsService
     private readonly string _settingsPath;
     private SettingsData _data = new();
     public string? LoadIssue { get; private set; }
+    public bool IncludeUnknownVersions
+    {
+        get { lock (_sync) return _data.IncludeUnknownVersions; }
+        set { lock (_sync) { _data.IncludeUnknownVersions = value; SaveLocked(); } }
+    }
 
     public SettingsService() : this(DefaultSettingsPath, LegacySettingsPath) { }
 
@@ -234,6 +240,7 @@ public sealed class SettingsService : ISettingsService
 
     private sealed class SettingsData
     {
+        public bool IncludeUnknownVersions { get; set; }
         public int Version { get; set; } = 5;
         public List<string> DisabledSources { get; set; } = [];
         public Dictionary<string, string> ExecutableOverrides { get; set; } = new(StringComparer.OrdinalIgnoreCase);

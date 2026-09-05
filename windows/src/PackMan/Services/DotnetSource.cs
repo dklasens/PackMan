@@ -55,7 +55,7 @@ public sealed class DotnetSource(IToolResolver resolver, IProcessRunner runner, 
     {
         progress?.Report(SourcePhase.Scanning);
         var result = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
-            Arguments(context, "tool", "list", "--global"), context.Environment, TimeSpan.FromMinutes(1)),
+            Arguments(context, "tool", "list", "--global"), InventoryEnvironment(context), TimeSpan.FromMinutes(1)),
             cancellationToken: cancellationToken);
         if (!result.Success) throw SourceSupport.CommandFailure("dotnet tool list", result);
         var parsed = DotnetToolListParser.Parse(result.StdOut);
@@ -78,6 +78,23 @@ public sealed class DotnetSource(IToolResolver resolver, IProcessRunner runner, 
 
     public override bool SupportsCacheClear => true;
 
+    private static IReadOnlyDictionary<string, string> InventoryEnvironment(ToolContext context) =>
+        new Dictionary<string, string>(context.Environment) { ["DOTNET_CLI_UI_LANGUAGE"] = "en-US" };
+
+    public override async Task<IReadOnlyDictionary<string, UpdateVerification>> VerifyAsync(
+        IReadOnlyList<UpdateRequest> requests, ToolContext context, CancellationToken cancellationToken = default)
+    {
+        var result = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
+            Arguments(context, "tool", "list", "--global"), InventoryEnvironment(context), TimeSpan.FromMinutes(1)),
+            cancellationToken: cancellationToken);
+        if (!result.Success) throw SourceSupport.CommandFailure("dotnet installed inventory", result);
+        var parsed = DotnetToolListParser.Parse(result.StdOut);
+        if (parsed.Issues.Count > 0)
+            throw new SourceException(SourceIssueKind.Verification, string.Join("; ", parsed.Issues.Select(i => i.Message)));
+        return requests.ToDictionary(r => r.Identity, r => VerifyInstalled(parsed.Tools.FirstOrDefault(p =>
+            p.Id.Equals(r.PackageId, StringComparison.OrdinalIgnoreCase)).Version, r), StringComparer.OrdinalIgnoreCase);
+    }
+
     public override async Task<string> ClearCacheAsync(ToolContext context,
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
     {
@@ -88,7 +105,7 @@ public sealed class DotnetSource(IToolResolver resolver, IProcessRunner runner, 
         return "Cleared the NuGet caches (global packages, HTTP, temp, plugins).";
     }
 
-    public override async Task UpdateAsync(UpdateRequest request, ToolContext context,
+    public override async Task<UpdateResult> UpdateAsync(UpdateRequest request, ToolContext context,
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
     {
         Validate(request);
@@ -96,6 +113,7 @@ public sealed class DotnetSource(IToolResolver resolver, IProcessRunner runner, 
             Arguments(context, "tool", "update", "--global", request.PackageId, "--version", request.TargetVersion),
             context.Environment, TimeSpan.FromMinutes(15), request.Elevated), output, cancellationToken);
         if (!result.Success) throw SourceSupport.CommandFailure("dotnet tool update", result);
+        return new();
     }
 
     private async Task<(PackageInfo? Update, SourceIssue? Issue)> LookupNuGetAsync(
@@ -153,6 +171,8 @@ public static class DotnetToolListParser
             }
             tools.Add((parts[0], parts[1]));
         }
+        if (!inTable) issues.Add(new(SourceIssueKind.Parsing,
+            "The .NET installed-tool table was not recognized. No empty result can be confirmed."));
         return new(tools, issues.DistinctBy(i => i.Id).ToList());
     }
 }
