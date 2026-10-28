@@ -27,6 +27,7 @@ Every package operation obtains a fresh manager context. Verification rechecks t
 ## CI and release
 
 - macOS CI runs on macOS 15 / Xcode 16.4 and macOS 26 / Xcode 26.6. Swift compiler warnings fail both SwiftPM and Xcode tests.
+- The output-limit regression uses larger lines to test the 16 MB byte limit without imposing a millions-of-lines throughput requirement on shared runners. The original tiny-line fixture also timed out on the pre-v1.10 main branch in hosted CI.
 - Release packaging retains the Xcode 16.4 baseline and universal arm64/x86_64 output.
 - Release platform selection compares the normalized tag version with `project.yml` and the Windows project version. A `v1.10` tag selects macOS only. Explicit workflow dispatch rejects mismatched platform versions.
 - The release workflow produces the ZIP, DMG, and SHA-256 checksums through `make-app.sh`, which verifies bundle metadata, architectures, and ad-hoc signatures.

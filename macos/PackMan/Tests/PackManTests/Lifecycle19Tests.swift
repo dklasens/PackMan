@@ -24,8 +24,11 @@ final class Lifecycle19Tests: XCTestCase {
     }
 
     func testOutputCaptureLimitStopsUnboundedCommand() async throws {
+        // Exercise the byte limit without requiring a shared CI runner to
+        // decode and dispatch millions of tiny output lines before timeout.
+        let line = String(repeating: "test", count: 1024)
         do {
-            _ = try await ProcessRunner.shared.run("/usr/bin/yes", ["test"], timeout: 10)
+            _ = try await ProcessRunner.shared.run("/usr/bin/yes", [line], timeout: 10)
             XCTFail("Expected output limit")
         } catch let error as ProcessError {
             guard case .outputLimit = error else { return XCTFail("Expected output limit, got \(error)") }
