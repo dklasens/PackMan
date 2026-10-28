@@ -9,8 +9,8 @@ settings:
   base:
     MACOSX_DEPLOYMENT_TARGET: "14.0"
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "1.9.1"
-    CURRENT_PROJECT_VERSION: "3"
+    MARKETING_VERSION: "1.10"
+    CURRENT_PROJECT_VERSION: "4"
     CODE_SIGN_IDENTITY: "-"
     CODE_SIGN_STYLE: Manual
     DEVELOPMENT_TEAM: ""
@@ -36,6 +36,8 @@ targets:
         NSPrincipalClass: NSApplication
     settings:
       base:
+        MARKETING_VERSION: "1.10"
+        CURRENT_PROJECT_VERSION: "4"
         PRODUCT_BUNDLE_IDENTIFIER: com.packman.PackMan
         PRODUCT_NAME: PackMan
         INFOPLIST_FILE: Resources/Info.plist

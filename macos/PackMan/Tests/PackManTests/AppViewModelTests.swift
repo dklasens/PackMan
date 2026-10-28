@@ -260,52 +260,48 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testClearAllCachesOpensPreviewWithoutMutation() async throws {
-        let clearedCounter = Counter()
+        let cacheRunner = StubProcessRunner()
         let source1 = StubSource(
             id: .npm,
             name: "npm",
             probe: { .available(testToolContext) },
-            scan: { SourceScanReport() },
-            clearCache: { await clearedCounter.increment(); return 1024 })
+            scan: { SourceScanReport() })
         let source2 = StubSource(
             id: .homebrew,
             name: "Homebrew",
             probe: { .available(testToolContext) },
-            scan: { SourceScanReport() },
-            clearCache: { await clearedCounter.increment(); return 2048 })
+            scan: { SourceScanReport() })
 
-        let viewModel = AppViewModel(sources: [source1, source2], settings: MemorySettings())
+        let viewModel = AppViewModel(sources: [source1, source2], settings: MemorySettings(), cacheInspector: CacheInspector(runner: cacheRunner))
         viewModel.startClearAllCaches()
         try await waitUntilIdle(viewModel)
 
-        let clearedCount = await clearedCounter.value
-        XCTAssertEqual(clearedCount, 0)
+        let cacheCalls = await cacheRunner.invocations
+        XCTAssertTrue(cacheCalls.isEmpty)
         XCTAssertTrue(viewModel.isCachePresented)
         XCTAssertEqual(viewModel.selectedCacheSources, [.npm, .homebrew])
     }
 
     func testClearCacheSingleSelectsSourceWithoutMutation() async throws {
-        let clearedCounter = Counter()
+        let cacheRunner = StubProcessRunner()
         let source1 = StubSource(
             id: .npm,
             name: "npm",
             probe: { .available(testToolContext) },
-            scan: { SourceScanReport() },
-            clearCache: { await clearedCounter.increment(); return 1024 })
+            scan: { SourceScanReport() })
         let source2 = StubSource(
             id: .pip,
             name: "pip",
             probe: { .available(testToolContext) },
-            scan: { SourceScanReport() },
-            clearCache: { await clearedCounter.increment(); return 2048 })
+            scan: { SourceScanReport() })
 
-        let viewModel = AppViewModel(sources: [source1, source2], settings: MemorySettings())
+        let viewModel = AppViewModel(sources: [source1, source2], settings: MemorySettings(), cacheInspector: CacheInspector(runner: cacheRunner))
         let option1 = try XCTUnwrap(viewModel.sourceOptions.first { $0.id == .npm })
         viewModel.startClearCacheSingle(option1)
         try await waitUntilIdle(viewModel)
 
-        let clearedCount = await clearedCounter.value
-        XCTAssertEqual(clearedCount, 0)
+        let cacheCalls = await cacheRunner.invocations
+        XCTAssertTrue(cacheCalls.isEmpty)
         XCTAssertEqual(viewModel.selectedCacheSources, [.npm])
     }
 

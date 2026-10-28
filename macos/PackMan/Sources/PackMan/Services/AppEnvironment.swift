@@ -11,7 +11,8 @@ enum AppEnvironment {
             NSApplication.shared.appearance = NSAppearance(named: arguments[index + 1] == "Dark" ? .darkAqua : .aqua)
         }
         let source = UITestPackageSource(scenario: scenario)
-        return AppViewModel(sources: [source], settings: UITestSettings(), updater: NoOpAppUpdateService(), cacheInspector: UITestCacheInspector())
+        return AppViewModel(sources: [source], settings: UITestSettings(ignored: scenario == .ignored ? ["npm:alpha", "npm:beta"] : []),
+            updater: NoOpAppUpdateService(), cacheInspector: UITestCacheInspector())
         #else
         return AppViewModel()
         #endif
@@ -33,6 +34,8 @@ private enum UITestScenario: String, Sendable {
     case failedUpdate
     case manual
     case quitScan
+    case ignored
+    case skipped
 }
 
 private struct UITestPackageSource: PackageSource {
@@ -71,6 +74,7 @@ private struct UITestPackageSource: PackageSource {
         ]
         if scenario == .manual { return SourceScanReport(updates: [PackageInfo(id: "123456", name: "Manual App", currentVersion: "1", availableVersion: "2")]) }
         if scenario == .initial { return SourceScanReport() }
+        if scenario == .skipped { return SourceScanReport(skippedCount: 2) }
         if scenario == .partial {
             return SourceScanReport(
                 updates: [updates[0]],
@@ -106,6 +110,9 @@ private final class UITestSettings: SettingsStoring, @unchecked Sendable {
     private let lock = NSLock()
     private var enabled = true
     private var overridePath: String?
+    private var ignored: Set<String>
+
+    init(ignored: Set<String> = []) { self.ignored = ignored }
 
     func isSourceEnabled(_ id: SourceID) -> Bool {
         lock.lock(); defer { lock.unlock() }
@@ -129,8 +136,11 @@ private final class UITestSettings: SettingsStoring, @unchecked Sendable {
 
     func cachedContext(for sourceID: SourceID) -> ToolContext? { nil }
     func setCachedContext(_ context: ToolContext?, for sourceID: SourceID) throws {}
-    func ignoredUpdateKeys() -> Set<String> { [] }
-    func setUpdateIgnored(_ key: String, ignored: Bool) throws {}
+    func ignoredUpdateKeys() -> Set<String> { lock.lock(); defer { lock.unlock() }; return ignored }
+    func setUpdateIgnored(_ key: String, ignored: Bool) throws {
+        lock.lock(); defer { lock.unlock() }
+        if ignored { self.ignored.insert(key) } else { self.ignored.remove(key) }
+    }
     func lastAppUpdateCheck() -> Date? { nil }
     func setLastAppUpdateCheck(_ date: Date?) throws {}
     func skippedAppUpdateVersion() -> String? { nil }

@@ -14,6 +14,7 @@
 		0F9ED6E2B58D43074114EE0F /* NpmSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = E74120D2BBA4B474321DD278 /* NpmSource.swift */; };
 		0FDA56AC01D923C0DF7EB322 /* MasSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E0CB1FDAD3A2D663C402377 /* MasSource.swift */; };
 		19A231BBD43BF6337681B023 /* Cache19Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E261EB1E9AFC5AF79D72F5C /* Cache19Tests.swift */; };
+		1A5A98773091FF2700F21A20 /* Reliability110Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A5A98763091FF2700F21A20 /* Reliability110Tests.swift */; };
 		1B9499DB4DB2A040B4D02BD4 /* AppViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 436C35B17C4AAA14340CDEFC /* AppViewModelTests.swift */; };
 		1BE144D334BFB29A18F97F10 /* pipx-outdated.json in Resources */ = {isa = PBXBuildFile; fileRef = 145BEB10AFAA37D76D6A1520 /* pipx-outdated.json */; };
 		200627A628E7BACD4C8079C7 /* ProcessRunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC1D372843D08125F8A9FAC2 /* ProcessRunnerTests.swift */; };
@@ -78,6 +79,7 @@
 		0A76839A48148FE11B911A94 /* PackageSort.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PackageSort.swift; sourceTree = "<group>"; };
 		0AA5768898BA4187D6C56F23 /* ProcessRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessRunner.swift; sourceTree = "<group>"; };
 		145BEB10AFAA37D76D6A1520 /* pipx-outdated.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "pipx-outdated.json"; sourceTree = "<group>"; };
+		1A5A98763091FF2700F21A20 /* Reliability110Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Reliability110Tests.swift; sourceTree = "<group>"; };
 		1E261EB1E9AFC5AF79D72F5C /* Cache19Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Cache19Tests.swift; sourceTree = "<group>"; };
 		1F8FA0281571EF0B417CCBCA /* PackManUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PackManUITests.swift; sourceTree = "<group>"; };
 		21A23AFBFED110592266B6B8 /* PipxSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PipxSource.swift; sourceTree = "<group>"; };
@@ -169,6 +171,7 @@
 				23348878572F1EBB858E17D8 /* SortingAndRefreshTests.swift */,
 				584FCE81FB2F8AA4405C1462 /* SourceParsingTests.swift */,
 				CF6EDEF9817D423ACB870288 /* TestSupport.swift */,
+				1A5A98763091FF2700F21A20 /* Reliability110Tests.swift */,
 			);
 			path = PackManTests;
 			sourceTree = "<group>";
@@ -433,6 +436,7 @@
 				9C45A9B5A26CED93A8AA0C7D /* AppUpdateTests.swift in Sources */,
 				1B9499DB4DB2A040B4D02BD4 /* AppViewModelTests.swift in Sources */,
 				19A231BBD43BF6337681B023 /* Cache19Tests.swift in Sources */,
+				1A5A98773091FF2700F21A20 /* Reliability110Tests.swift in Sources */,
 				87B11AC1086AEDF15E9ED048 /* Lifecycle19Tests.swift in Sources */,
 				200627A628E7BACD4C8079C7 /* ProcessRunnerTests.swift in Sources */,
 				7B565CC915388C2E83508682 /* Release19Tests.swift in Sources */,
@@ -620,10 +624,15 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 4;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Resources/Info.plist;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.10;
 				PRODUCT_BUNDLE_IDENTIFIER = com.packman.PackMan;
 				PRODUCT_NAME = PackMan;
 				SDKROOT = macosx;
@@ -635,10 +644,15 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 4;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Resources/Info.plist;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.10;
 				PRODUCT_BUNDLE_IDENTIFIER = com.packman.PackMan;
 				PRODUCT_NAME = PackMan;
 				SDKROOT = macosx;

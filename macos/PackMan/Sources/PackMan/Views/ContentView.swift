@@ -582,6 +582,13 @@ private struct EmptyStateView: View {
                     "No Displayable Updates",
                     systemImage: "shippingbox",
                     description: Text("\(viewModel.ignoredCount) ignored updates; \(viewModel.skippedCount) source exclusions. Review Sources for coverage and ignored updates."))
+            case .noAutomaticUpdates:
+                state(
+                    title: "No Automatic Updates Pending",
+                    systemImage: "info.circle",
+                    description: viewModel.nonAutomaticSummary + " Review Sources for coverage and ignored updates.",
+                    action: "Sources…",
+                    actionHandler: { viewModel.isSourcesSheetPresented = true })
             case .updatesCompleted(let date):
                 state(
                     title: "Updates Completed",

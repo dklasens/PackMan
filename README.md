@@ -7,17 +7,17 @@ PackMan has two native streams sharing one repo:
 - **`windows/`** — PackMan for Windows, built with WPF on .NET 10
 - **`macos/`** — SwiftUI (native macOS app)
 
-## Latest release: v1.9.1
+## Latest macOS release: v1.10
 
-macOS 1.9.1 adds package details and recovery, persistent history and diagnostic export, configured cache previews, source setup, UI polish, and improvements to verification, cancellation and self-update. This release also includes the latest Windows 1.9 implementation rebuilt as v1.9.1; Windows functionality is unchanged.
+macOS 1.10 protects history recovery from manager-environment changes and ambiguous package identities, refreshes manager capabilities between updates, and explains ignored, manual, and skipped-only scans. It also consolidates cache cleanup and adds a second Xcode CI lane with compiler warnings treated as errors. Windows remains at v1.9.1.
 
-See the [v1.9.1 release notes and downloads](https://github.com/dklasens/PackMan/releases/tag/v1.9.1), [changelog](CHANGELOG.md), or [release notes in this repository](.github/release-notes/v1.9.1.md).
+See the [v1.10 Mac release notes and downloads](https://github.com/dklasens/PackMan/releases/tag/v1.10), [changelog](CHANGELOG.md), or [release notes in this repository](.github/release-notes/v1.10.md). The [Windows v1.9.1 downloads](https://github.com/dklasens/PackMan/releases/tag/v1.9.1) remain available.
 
 ## What it does
 
 Pick which sources to include, hit **Scan**, select the packages you want, and click **Update Selected**. Progress and command output are shown in a built-in log.
 
-See the [Mac implementation and validation notes](MACOS_IMPLEMENTATION_1.9.md) for technical details and test coverage.
+See the [Mac v1.10 design and validation notes](MACOS_IMPLEMENTATION_1.10.md) for these changes, or the [Mac 1.9 implementation notes](MACOS_IMPLEMENTATION_1.9.md) for the underlying features.
 
 ### macOS sources
 
@@ -63,11 +63,13 @@ The app is ad-hoc signed and cannot be notarized because this project does not u
 
 Updates can be ignored for one version or for a package entirely from the table's context menu, then restored from **Sources → Ignored Updates**.
 
+In **v1.10**, History recovery checks the recorded manager path and runtime search paths before installing or verifying. If the environment changed, select the original executable in Sources and scan again. Ambiguous identities stay blocked through History as well as the main table. Scans with only ignored, manual, or skipped results explain those counts instead of reporting zero available updates.
+
 > PackMan checks GitHub once a day for a newer release and shows a banner when one is available. **Install and Restart** downloads `PackMan-macOS.zip`, verifies the checksum, bundle identity, version, architecture and signature, then stages a recoverable replacement and relaunches it. The helper retains a result log in `~/Library/Application Support/PackMan/self-update.log`. **Skip** hides that version; **PackMan → Check for Updates…** checks immediately. The first time you open a browser-downloaded zip or disk image you may still need **Open Anyway**.
 
 ### Windows
 
-Grab the latest `PackMan-Windows-x64.zip` (or the standalone `PackMan-Windows-x64.exe`) from the [Releases](https://github.com/dklasens/PackMan/releases) page. Extract the zip, then run `PackMan.exe`. Requires the .NET 10 Desktop Runtime; if it is missing, Windows offers to download it on first launch.
+Grab the latest `PackMan-Windows-x64.zip` (or the standalone `PackMan-Windows-x64.exe`) from the [Windows v1.9.1 release](https://github.com/dklasens/PackMan/releases/tag/v1.9.1). Extract the zip, then run `PackMan.exe`. Requires the .NET 10 Desktop Runtime; if it is missing, Windows offers to download it on first launch.
 
 > PackMan checks GitHub once a day for a newer release and shows a banner when one is available. **Install and Restart** downloads the release zip, verifies it against the published SHA-256 checksum, then replaces the app and restarts it; administrator approval is only requested when PackMan lives in a protected folder such as Program Files. A version can be skipped from the banner, and **Help → Check for Updates** checks immediately.
 
@@ -98,7 +100,7 @@ xcodebuild test -project PackMan.xcodeproj -scheme PackMan -destination 'platfor
 
 `make-app.sh` builds a universal Release app, applies an ad-hoc signature, verifies the bundle, and writes `dist/PackMan.app`, `dist/PackMan-macOS.zip`, `dist/PackMan-macOS.dmg`, and a `.sha256` checksum for each archive. Override release metadata with `PACKMAN_VERSION=1.2.3` and `PACKMAN_BUILD_NUMBER=123`.
 
-Pushing a tag such as `v1.2.3` runs both test suites (macOS and Windows), then publishes the packaged macOS and Windows files to a GitHub Release. The **PackMan Release** workflow can also be run manually (`workflow_dispatch`) to rebuild one or both platforms and attach the artifacts to an existing tag without retagging. The workflow needs only the repository-provided `GITHUB_TOKEN`; it does not require signing certificates, Apple credentials, or repository secrets.
+Pushing a tag such as `v1.10` builds only platforms whose declared version matches that tag, runs their tests, and publishes their artifacts to a GitHub Release. Mac v1.10 therefore produces only the universal ZIP, DMG, and checksums; Windows stays at v1.9.1. macOS CI tests Xcode 16.4 and 26.6, with compiler warnings treated as errors. The **PackMan Release** workflow can also be run manually (`workflow_dispatch`) to rebuild one or both matching platforms and attach the artifacts to an existing tag without retagging. The workflow needs only the repository-provided `GITHUB_TOKEN`; it does not require signing certificates, Apple credentials, or repository secrets.
 
 ### Windows
 

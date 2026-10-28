@@ -181,7 +181,7 @@ final class AppViewModel {
 
     var scanCompletedAt: Date? {
         switch scanSummary {
-        case .updatesCompleted(let date), .upToDate(let date),
+        case .updatesCompleted(let date), .upToDate(let date), .noAutomaticUpdates(let date),
              .completedWithIssues(_, _, let date), .allUnavailable(let date), .cancelled(let date):
             return date
         default:
@@ -230,7 +230,8 @@ final class AppViewModel {
         case .running: return "Scanning…"
         case .updatesAvailable(let count): return Self.count(count, singular: "update available", plural: "updates available").capitalized + "."
         case .updatesCompleted: return "Selected updates completed."
-        case .upToDate: return detectedCount > 0 ? "No automatic updates pending; \(ignoredCount) ignored, \(manualCount) manual." : "No updates found in the sources checked."
+        case .upToDate: return "No updates found in the sources checked."
+        case .noAutomaticUpdates: return nonAutomaticSummary
         case .completedWithIssues(let updates, let issues, _):
             return "Scan completed with \(Self.count(issues, singular: "issue", plural: "issues")) and \(Self.count(updates, singular: "update", plural: "updates"))."
         case .allUnavailable: return "No enabled sources could be scanned."
@@ -241,6 +242,16 @@ final class AppViewModel {
 
     var footerText: String {
         "\(selectedCount) visible selected · \(totalSelectedCount) selected total · \(updateCount) automatic · \(manualCount) manual · \(ignoredCount) ignored · \(skippedCount) skipped"
+    }
+
+    var nonAutomaticSummary: String {
+        var details: [String] = []
+        if ignoredCount > 0 { details.append("\(ignoredCount) ignored") }
+        if manualCount > 0 { details.append("\(manualCount) require a manual update") }
+        if skippedCount > 0 { details.append("\(skippedCount) skipped by source policy") }
+        let ambiguous = packages.filter(\.identityIsAmbiguous).count
+        if ambiguous > 0 { details.append("\(ambiguous) have ambiguous identities") }
+        return "No automatic updates pending" + (details.isEmpty ? "." : "; " + details.joined(separator: ", ") + ".")
     }
 
     func startScan() {
@@ -737,15 +748,22 @@ final class AppViewModel {
         }
         if issueCount > 0 {
             scanSummary = .completedWithIssues(updateCount: updateCount, issueCount: issueCount, completedAt: completedAt)
+        } else if updateCount > 0 {
+            scanSummary = .updatesAvailable(updateCount)
         } else if detectedCount == 0 && skippedCount == 0 {
             scanSummary = .upToDate(completedAt)
         } else {
-            scanSummary = .updatesAvailable(packages.count)
+            scanSummary = .noAutomaticUpdates(completedAt)
         }
     }
 
     private func startUpdate(packages selected: [PackageUpdate], verificationOnly: Bool = false) {
         guard activeTask == nil, !selected.isEmpty else { return }
+        guard selected.allSatisfy({ !$0.identityIsAmbiguous && (verificationOnly || $0.isActionable) }) else {
+            appendLog("This action is unavailable for a manual, completed, or ambiguous package. Scan again to resolve its identity before retrying.", level: .warning)
+            isLogVisible = true
+            return
+        }
         activeTask = Task { [weak self] in
             await self?.runUpdates(selected, verificationOnly: verificationOnly)
         }
@@ -764,8 +782,14 @@ final class AppViewModel {
 
     func recoverHistory(_ entry: UpdateHistoryEntry, verifyOnly: Bool) {
         guard !isBusy, let source = sourceOptions.first(where: { $0.id == entry.sourceID })?.source else { return }
-        let context = ToolContext(executablePath: entry.toolPath, version: "", pathEntries: [], origin: .knownPath)
-        let row = packages.first(where: { $0.sourceID == entry.sourceID && $0.packageID == entry.packageID }) ??
+        let context = entry.toolContext ?? ToolContext(executablePath: entry.toolPath, version: "", pathEntries: [], origin: .knownPath)
+        let existing = packages.first(where: { $0.sourceID == entry.sourceID && $0.packageID == entry.packageID })
+        if let existing, !context.matchesEnvironment(existing.toolContext) {
+            appendLog("History belongs to a different manager environment (\(entry.toolPath)). Select that executable in Sources and scan again before recovering this attempt.", level: .warning)
+            isLogVisible = true
+            return
+        }
+        let row = existing ??
             PackageUpdate(info: PackageInfo(id: entry.packageID, name: entry.name, currentVersion: entry.installedVersion ?? entry.beforeVersion,
                 availableVersion: entry.targetVersion, registryID: entry.registryID), source: source, context: context)
         if !packages.contains(where: { $0.id == row.id }) { packages.append(row) }
@@ -778,7 +802,7 @@ final class AppViewModel {
         let entry = UpdateHistoryEntry(runID: UUID(), sourceID: package.sourceID, packageID: package.packageID,
             registryID: package.registryID, name: package.name, beforeVersion: package.currentVersion,
             targetVersion: package.availableVersion, outcome: .external, toolPath: package.toolContext.executablePath,
-            evidence: "Handed off to the user. No installed version has been verified.")
+            evidence: "Handed off to the user. No installed version has been verified.", toolContext: package.toolContext)
         _ = saveHistory([entry])
     }
 
@@ -810,7 +834,8 @@ final class AppViewModel {
         var attempts = Dictionary(selected.map { package in
             let entry = UpdateHistoryEntry(runID: runID, sourceID: package.sourceID, packageID: package.packageID,
                 registryID: package.registryID, name: package.name, beforeVersion: package.currentVersion,
-                targetVersion: package.availableVersion, toolPath: package.toolContext.executablePath, verificationOnly: verificationOnly)
+                targetVersion: package.availableVersion, toolPath: package.toolContext.executablePath,
+                verificationOnly: verificationOnly, toolContext: package.toolContext)
             package.attemptID = entry.id
             package.output = ""
             return (package.id, entry)
@@ -825,26 +850,11 @@ final class AppViewModel {
         for option in sourceOptions {
             let rows = selected.filter { $0.sourceID == option.id }
             guard !rows.isEmpty, !Task.isCancelled, !stop else { continue }
-            // Reprobe at the operation boundary: a history entry or scan may hold
-            // a now-replaced manager or obsolete npm/mas version.
-            guard case .available(let context) = await option.source.probe() else {
-                for row in rows {
-                    row.status = .failed(.update, "The selected manager is unavailable. Recheck it in Sources.")
-                    attempts[row.id]?.outcome = .failed
-                    attempts[row.id]?.evidence = row.statusMessage ?? "Manager unavailable."
-                    attempts[row.id]?.finishedAt = .now
-                    summary.failed += 1
-                }
-                stop = !saveHistory(rows.compactMap { attempts[$0.id] })
-                continue
-            }
-            setSourceContext(context, for: option.id)
             var verifyRows: [PackageUpdate] = []
+            var verificationContext: ToolContext?
             for row in rows {
-                row.toolContext = context
                 guard !Task.isCancelled, !stop else { break }
                 operation = .updating(current: row.name, completed: completed, total: selected.count)
-                attempts[row.id]?.toolPath = context.executablePath
                 attempts[row.id]?.outcome = .running
                 guard saveHistory([attempts[row.id]!]) else {
                     attempts[row.id]?.outcome = .queued
@@ -855,6 +865,12 @@ final class AppViewModel {
                 row.verificationEvidence = nil
                 let commandID = row.attemptID!.uuidString
                 do {
+                    // A preceding package may have upgraded the manager itself. Refresh
+                    // capabilities for every operation, while keeping its environment fixed.
+                    let context = try await Self.checkedContext(for: option.source, expected: row.toolContext)
+                    row.toolContext = context
+                    setSourceContext(context, for: option.id)
+                    attempts[row.id]?.toolContext = context
                     if !verificationOnly {
                         try await option.source.update(request: row.updateRequest, context: context) { [weak self, weak row] event in
                             await self?.appendPackageOutput(row, commandID: commandID, event: event)
@@ -865,6 +881,7 @@ final class AppViewModel {
                     }
                     row.status = .verifying
                     verifyRows.append(row)
+                    verificationContext = context
                     attempts[row.id]?.outcome = .unverified
                     attempts[row.id]?.evidence = "Installed state has not yet been verified."
                 } catch {
@@ -882,7 +899,7 @@ final class AppViewModel {
                 completed += 1
                 applySort()
             }
-            if !verifyRows.isEmpty { batches.append(VerificationBatch(source: option.source, context: context, packages: verifyRows)) }
+            if let context = verificationContext { batches.append(VerificationBatch(source: option.source, context: context, packages: verifyRows)) }
         }
 
         let outcomes = await withTaskGroup(of: VerificationOutcome.self, returning: [SourceID: VerificationOutcome.Result].self) { group in
@@ -891,7 +908,8 @@ final class AppViewModel {
                 group.addTask {
                     do {
                         try Task.checkCancellation()
-                        return VerificationOutcome(sourceID: source.id, result: .verified(try await source.verify(requests: requests, context: context)))
+                        let refreshed = try await Self.checkedContext(for: source, expected: context)
+                        return VerificationOutcome(sourceID: source.id, result: .verified(try await source.verify(requests: requests, context: refreshed)))
                     } catch {
                         if Task.isCancelled || error is CancellationError || (error as? ProcessError)?.isCancellation == true {
                             return VerificationOutcome(sourceID: source.id, result: .cancelled)
@@ -952,8 +970,20 @@ final class AppViewModel {
         applySort()
         updateSummary = summary
         deriveScanSummary(completedAt: lastScanDate ?? .now)
-        if packages.isEmpty && ignoredCount == 0 && issueSources.isEmpty { scanSummary = .updatesCompleted(.now) }
+        if packages.isEmpty && ignoredCount == 0 && skippedCount == 0 && issueSources.isEmpty { scanSummary = .updatesCompleted(.now) }
         appendLog("Run finished: \(summary.updated) updated, \(summary.verified) verified, \(summary.failed) failed, \(summary.verificationFailed) unverified, \(summary.cancelled) cancelled, \(summary.notStarted) not started.")
+    }
+
+    private nonisolated static func checkedContext(for source: any PackageSource, expected: ToolContext) async throws -> ToolContext {
+        let probe = await source.probe()
+        try Task.checkCancellation()
+        guard case .available(let context) = probe else {
+            throw SourceError.commandFailed("The selected manager is unavailable. Recheck it in Sources.")
+        }
+        guard expected.matchesEnvironment(context) else {
+            throw SourceError.commandFailed("The manager environment changed from \(expected.executablePath) to \(context.executablePath), or its runtime search paths changed. No update or inventory command was run in the new environment. Select the original executable in Sources and scan again.")
+        }
+        return context
     }
 
     private func appendPackageOutput(_ package: PackageUpdate?, commandID: String, event: ProcessOutputEvent) {

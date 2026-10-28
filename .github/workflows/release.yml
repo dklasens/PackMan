@@ -10,15 +10,16 @@ on:
       tag:
         description: Existing release tag to attach assets to
         required: true
-        default: v1.9
+        default: v1.10
       platform:
-        description: Platforms to build and publish
+        description: Platforms to build and publish (auto matches declared versions)
         type: choice
         options:
+          - auto
           - macos
           - windows
           - both
-        default: both
+        default: auto
 
 permissions:
   contents: write
@@ -27,8 +28,51 @@ env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
 
 jobs:
+  platforms:
+    name: Select versioned release platforms
+    runs-on: ubuntu-latest
+    outputs:
+      macos: ${{ steps.select.outputs.macos }}
+      windows: ${{ steps.select.outputs.windows }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - name: Match the tag to platform versions
+        id: select
+        env:
+          REQUESTED_PLATFORM: ${{ github.event_name == 'workflow_dispatch' && inputs.platform || 'auto' }}
+        run: |
+          python3 - <<'PY'
+          import os, re, pathlib, xml.etree.ElementTree as ET
+          def version(value):
+              if not re.fullmatch(r'v?\d+\.\d+(?:\.\d+)?', value):
+                  raise SystemExit(f'Invalid release version: {value}')
+              parts = tuple(map(int, value.removeprefix('v').split('.')))
+              return parts + (0,) * (3 - len(parts))
+          tag = version(os.environ['RELEASE_TAG'])
+          spec = pathlib.Path('macos/PackMan/project.yml').read_text()
+          mac = re.search(r'MARKETING_VERSION:\s*"?([\d.]+)', spec).group(1)
+          win = ET.parse('windows/src/PackMan/PackMan.csproj').findtext('.//Version')
+          requested = os.environ['REQUESTED_PLATFORM']
+          selected = {name: version(value) == tag for name, value in [('macos', mac), ('windows', win)]}
+          if requested != 'auto':
+              for name in selected:
+                  wanted = requested in (name, 'both')
+                  if wanted and not selected[name]:
+                      raise SystemExit(f'{name} version does not match the release tag')
+                  selected[name] = wanted
+          if not any(selected.values()):
+              raise SystemExit('No platform version matches the release tag')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for name, enabled in selected.items():
+                  print(f'{name}={str(enabled).lower()}', file=output)
+                  print(f'{name}: {"build" if enabled else "skip"}')
+          PY
+
   macos:
-    if: github.event_name == 'push' || inputs.platform == 'macos' || inputs.platform == 'both'
+    needs: platforms
+    if: needs.platforms.outputs.macos == 'true'
     runs-on: macos-15
     timeout-minutes: 25
     defaults:
@@ -40,12 +84,12 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
       - name: Select Xcode 16.4
         run: sudo xcode-select --switch /Applications/Xcode_16.4.app/Contents/Developer
-      - run: swift test --parallel
+      - run: swift test --parallel -Xswiftc -warnings-as-errors
       - name: Run app and UI tests
         run: >-
           xcodebuild test -project PackMan.xcodeproj -scheme PackMan
           -destination 'platform=macOS' -derivedDataPath "$RUNNER_TEMP/PackManDerivedData"
-          CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=
+          CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
       - name: Build ad-hoc signed app
         env:
           PACKMAN_BUILD_NUMBER: ${{ github.run_number }}
@@ -60,7 +104,8 @@ jobs:
             macos/PackMan/dist/PackMan-macOS.dmg.sha256
 
   windows:
-    if: github.event_name == 'push' || inputs.platform == 'windows' || inputs.platform == 'both'
+    needs: platforms
+    if: needs.platforms.outputs.windows == 'true'
     runs-on: windows-2025
     timeout-minutes: 25
     defaults:

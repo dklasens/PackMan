@@ -60,6 +60,7 @@ enum ScanSummary: Sendable, Equatable {
     case updatesAvailable(Int)
     case updatesCompleted(Date)
     case upToDate(Date)
+    case noAutomaticUpdates(Date)
     case completedWithIssues(updateCount: Int, issueCount: Int, completedAt: Date)
     case allUnavailable(Date)
     case noSources

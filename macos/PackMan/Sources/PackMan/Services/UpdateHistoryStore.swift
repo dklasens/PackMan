@@ -23,6 +23,7 @@ struct UpdateHistoryEntry: Identifiable, Codable, Sendable {
     var evidence = ""
     var output = ""
     var verificationOnly = false
+    var toolContext: ToolContext?
 
     var versionText: String { "\(beforeVersion) → \(installedVersion ?? "not confirmed") (requested \(targetVersion))" }
 }
@@ -126,6 +127,10 @@ enum DiagnosticRedactor {
             entry.name = redact(entry.name); entry.beforeVersion = redact(entry.beforeVersion)
             entry.targetVersion = redact(entry.targetVersion); entry.installedVersion = entry.installedVersion.map { redact($0) }
             entry.toolPath = redact(entry.toolPath); entry.evidence = redact(entry.evidence); entry.output = redact(entry.output)
+            if let context = entry.toolContext {
+                entry.toolContext = ToolContext(executablePath: redact(context.executablePath), version: redact(context.version),
+                    pathEntries: context.pathEntries.map { redact($0) }, origin: context.origin)
+            }
             return entry
         }
         struct Export: Encodable { let version: String; let history: [UpdateHistoryEntry]; let log: [String] }

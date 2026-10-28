@@ -86,6 +86,73 @@ final class Cache19Tests: XCTestCase {
     private func source(_ id: SourceID) -> StubSource {
         StubSource(id: id, name: id.rawValue, probe: { .available(testToolContext) }, scan: { SourceScanReport() })
     }
+
+    func testCleanupUsesThePreviewedManagerAndStreamsOutputForEverySource() async throws {
+        let cases: [(SourceID, [[String]])] = [
+            (.homebrew, [["cleanup"]]), (.homebrewCasks, [["cleanup"]]),
+            (.npm, [["cache", "clean", "--force"]]), (.pip, [["-m", "pip", "cache", "purge"]]),
+            (.pipx, [["cache", "purge"]]),
+            (.dotnet, ["http-cache", "temp", "plugins-cache"].map { ["nuget", "locals", $0, "--clear"] })
+        ]
+        for (id, commands) in cases {
+            let runner = StubProcessRunner()
+            let output = CacheOutputRecorder()
+            for command in commands {
+                await runner.enqueue(arguments: command, stub: .init(result: ProcessResult(exitCode: 0, stdout: "Cleared", stderr: ""),
+                    output: [.init(stream: .stdout, line: "Cleared")]))
+            }
+            let preview = CachePreview(sourceID: id, sourceName: id.rawValue, context: testToolContext, scope: "Test cache")
+            try await CacheInspector(runner: runner).clear(preview, includeGlobalPackages: false) { await output.append($0) }
+            let calls = await runner.invocations
+            let events = await output.events
+            XCTAssertEqual(calls.map(\.arguments), commands)
+            XCTAssertTrue(calls.allSatisfy { $0.executable == testToolContext.executablePath })
+            XCTAssertEqual(events.count, commands.count)
+        }
+    }
+
+    func testNugetGlobalPackagesAreOnlyClearedWithExplicitOptIn() async throws {
+        let runner = StubProcessRunner()
+        for _ in 0..<4 { await runner.enqueueAny(stub: .init(result: ProcessResult(exitCode: 0, stdout: "", stderr: ""))) }
+        let preview = CachePreview(sourceID: .dotnet, sourceName: ".NET", context: testToolContext, scope: "Test cache")
+        try await CacheInspector(runner: runner).clear(preview, includeGlobalPackages: true) { _ in }
+        let calls = await runner.invocations
+        XCTAssertEqual(calls.last?.arguments, ["nuget", "locals", "global-packages", "--clear"])
+        XCTAssertFalse(calls.contains { $0.arguments.contains("all") })
+    }
+
+    func testUnsupportedOrFailedPreviewsCannotStartCleanup() async throws {
+        let runner = StubProcessRunner()
+        for preview in [
+            CachePreview(sourceID: .appStore, sourceName: "App Store", context: testToolContext, scope: "Managed", supported: false),
+            CachePreview(sourceID: .pipx, sourceName: "pipx", context: testToolContext, scope: "Cache", issue: "Unsupported"),
+            CachePreview(sourceID: .npm, sourceName: "npm", scope: "No manager")
+        ] {
+            do {
+                try await CacheInspector(runner: runner).clear(preview, includeGlobalPackages: false) { _ in }
+                XCTFail("An unavailable preview must not execute cleanup")
+            } catch { }
+        }
+        let calls = await runner.invocations
+        XCTAssertTrue(calls.isEmpty)
+    }
+
+    func testCleanupFailureStopsFurtherNugetCommands() async throws {
+        let runner = StubProcessRunner()
+        await runner.enqueueAny(stub: .init(result: ProcessResult(exitCode: 1, stdout: "", stderr: "Locked cache")))
+        let preview = CachePreview(sourceID: .dotnet, sourceName: ".NET", context: testToolContext, scope: "Test cache")
+        do {
+            try await CacheInspector(runner: runner).clear(preview, includeGlobalPackages: true) { _ in }
+            XCTFail("Cleanup failure must be reported")
+        } catch { XCTAssertTrue(error.userMessage.contains("Locked cache")) }
+        let calls = await runner.invocations
+        XCTAssertEqual(calls.count, 1)
+    }
+}
+
+private actor CacheOutputRecorder {
+    var events: [ProcessOutputEvent] = []
+    func append(_ event: ProcessOutputEvent) { events.append(event) }
 }
 
 private actor StubCacheInspector: CacheInspecting {

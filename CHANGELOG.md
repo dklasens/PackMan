@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.10 — 2026-10-28
+
+### macOS
+
+- Keep history installs and verification bound to their recorded manager executable and runtime search paths. Preserve compatibility with older history entries that recorded only the executable path.
+- Enforce installation eligibility centrally, including ambiguous-identity protection for History retries.
+- Recheck manager capabilities before every package and before verification, including npm upgrades from 11 to 12 within one batch.
+- Explain ignored, manual, skipped, and ambiguous-only scan results without claiming that all packages are current.
+- Consolidate cache cleanup in `CacheInspector`; test the production cleanup path, NuGet global-package opt-in, output, and failure handling.
+- Add Xcode 26.6 alongside 16.4 in macOS CI and treat Swift warnings as errors. Remove the obsolete test with an unsafe concurrent capture.
+- Publish only platforms whose declared versions match the release tag. This is a Mac-only release; Windows remains at 1.9.1.
+
+[Release notes and downloads](https://github.com/dklasens/PackMan/releases/tag/v1.10)
+
 ## 1.9.1 — 2026-09-05
 
 ### macOS

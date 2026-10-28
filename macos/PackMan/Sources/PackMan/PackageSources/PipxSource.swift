@@ -194,36 +194,6 @@ struct PipxSource: PackageSource {
         }
     }
 
-    func clearCache(
-        context: ToolContext,
-        onOutput: @escaping @Sendable (ProcessOutputEvent) async -> Void
-    ) async throws -> Int64 {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let pipxCacheURLs = [
-            home.appendingPathComponent("Library/Caches/pipx"),
-            home.appendingPathComponent(".cache/pipx")
-        ]
-        let sizeBefore = SourceSupport.directorySize(at: pipxCacheURLs)
-
-        let result = try await runner.run(
-            context.executablePath,
-            ["cache", "purge"],
-            timeout: 180,
-            environment: SourceSupport.environment(pathEntries: context.pathEntries),
-            onOutput: onOutput)
-        if !result.succeeded {
-            let fallback = try await runner.run(
-                context.executablePath,
-                ["clear-cache"],
-                timeout: 180,
-                environment: SourceSupport.environment(pathEntries: context.pathEntries),
-                onOutput: onOutput)
-            guard fallback.succeeded else { throw SourceSupport.commandFailure("pipx cache purge", result: result) }
-        }
-
-        let sizeAfter = SourceSupport.directorySize(at: pipxCacheURLs)
-        return max(0, sizeBefore - sizeAfter)
-    }
 }
 
 enum PipxLookup: Sendable {

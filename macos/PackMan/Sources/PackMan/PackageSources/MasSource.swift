@@ -143,14 +143,6 @@ struct MasSource: PackageSource {
         throw SourceError.verificationFailed("App Store installed inventory contains an unrecognised record.")
     }
 
-    func clearCache(
-        context: ToolContext,
-        onOutput: @escaping @Sendable (ProcessOutputEvent) async -> Void
-    ) async throws -> Int64 {
-        await onOutput(ProcessOutputEvent(stream: .stdout, line: "App Store cache is managed automatically by macOS."))
-        return 0
-    }
-
     static func appStorePageURL(forADAMID id: String) -> URL? {
         URL(string: "macappstore://apps.apple.com/app/id\(id)")
     }

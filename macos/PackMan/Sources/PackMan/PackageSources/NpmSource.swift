@@ -169,24 +169,6 @@ struct NpmSource: PackageSource {
         return InstalledInventory.verify(requests, entries: entries)
     }
 
-    func clearCache(
-        context: ToolContext,
-        onOutput: @escaping @Sendable (ProcessOutputEvent) async -> Void
-    ) async throws -> Int64 {
-        let npmCacheURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".npm")
-        let sizeBefore = SourceSupport.directorySize(at: npmCacheURL)
-
-        let result = try await runner.run(
-            context.executablePath,
-            ["cache", "clean", "--force"],
-            timeout: 180,
-            environment: SourceSupport.environment(pathEntries: context.pathEntries),
-            onOutput: onOutput)
-        guard result.succeeded else { throw SourceSupport.commandFailure("npm cache clean", result: result) }
-
-        let sizeAfter = SourceSupport.directorySize(at: npmCacheURL)
-        return max(0, sizeBefore - sizeAfter)
-    }
 }
 
 struct NpmOutdatedEntry: Decodable {

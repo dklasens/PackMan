@@ -53,11 +53,21 @@ enum ToolResolution: Equatable, Sendable {
     case missingDependency(executablePath: String, dependency: String)
 }
 
-struct ToolContext: Equatable, Sendable {
+struct ToolContext: Equatable, Codable, Sendable {
     let executablePath: String
     let version: String
     let pathEntries: [String]
     let origin: ToolResolutionOrigin
+
+    /// Compare the selected installation, not its version. Do not resolve symlinks:
+    /// separate Python virtual environments can share the same interpreter binary.
+    /// Older history entries only recorded the executable, hence the empty-path fallback.
+    func matchesEnvironment(_ other: ToolContext) -> Bool {
+        func normalized(_ path: String) -> String { URL(fileURLWithPath: path).standardizedFileURL.path }
+        return normalized(executablePath) == normalized(other.executablePath)
+            && (pathEntries.isEmpty
+                || pathEntries.map(normalized) == other.pathEntries.map(normalized))
+    }
 
     var environment: [String: String] {
         let inherited = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
@@ -187,10 +197,6 @@ protocol PackageSource: Sendable {
         context: ToolContext
     ) async throws -> [String: UpdateVerification]
 
-    func clearCache(
-        context: ToolContext,
-        onOutput: @escaping @Sendable (ProcessOutputEvent) async -> Void
-    ) async throws -> Int64
 }
 
 extension PackageSource {
@@ -214,12 +220,6 @@ extension PackageSource {
             evidence: "This source does not provide installed inventory verification.")) }, uniquingKeysWith: { first, _ in first })
     }
 
-    func clearCache(
-        context: ToolContext,
-        onOutput: @escaping @Sendable (ProcessOutputEvent) async -> Void
-    ) async throws -> Int64 {
-        return 0
-    }
 }
 
 extension String {

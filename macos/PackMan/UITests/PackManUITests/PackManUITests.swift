@@ -13,6 +13,22 @@ final class PackManUITests: XCTestCase {
         XCTAssertFalse(button("updateSelectedButton", in: app).isEnabled)
     }
 
+    func testIgnoredOnlyScanExplainsWhyNoUpdatesAreShown() {
+        let app = launch("ignored")
+        button("scanCancelButton", in: app).click()
+        XCTAssertTrue(app.staticTexts["No Automatic Updates Pending"].firstMatch.waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "value CONTAINS '2 ignored' OR label CONTAINS '2 ignored'")).firstMatch.exists)
+        XCTAssertFalse(button("updateSelectedButton", in: app).isEnabled)
+    }
+
+    func testSkippedOnlyScanDoesNotClaimAllPackagesAreCurrent() {
+        let app = launch("skipped")
+        button("scanCancelButton", in: app).click()
+        XCTAssertTrue(app.staticTexts["No Automatic Updates Pending"].firstMatch.waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "value CONTAINS '2 skipped by source policy' OR label CONTAINS '2 skipped by source policy'")).firstMatch.exists)
+        XCTAssertFalse(app.staticTexts["No Updates Found"].exists)
+    }
+
     func testToolbarDoesNotShiftWhenScanStarts() {
         let app = launch("slowScan")
         let updateButton = button("updateSelectedButton", in: app)
@@ -134,6 +150,9 @@ final class PackManUITests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        // Screenshot capture needs a usable display/recording session. Behavioral
+        // assertions remain mandatory on CI and headless Xcode sessions.
+        guard ProcessInfo.processInfo.environment["PACKMAN_UI_SCREENSHOTS"] == "1" else { return }
         guard XCUIApplication().state != .notRunning else { return }
         let screenshot = XCTAttachment(screenshot: XCUIApplication().windows.firstMatch.screenshot())
         screenshot.name = name
