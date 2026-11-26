@@ -98,6 +98,9 @@ public sealed class PackManUiTests
             return details is not null;
         }));
         Assert.Equal("alpha", details!.FindFirstDescendant(cf => cf.ByAutomationId("packageDetailId"))!.AsTextBox().Text);
+        session.Button("detailsButton").Invoke();
+        Assert.Single(session.Application.GetAllTopLevelWindows(session.Automation), window =>
+            window.FindFirstDescendant(cf => cf.ByAutomationId("packageDetailId")) is not null);
         Capture(details, "package-details.png");
         details.FindFirstDescendant(cf => cf.ByAutomationId("verifyAgainButton"))!.AsButton().Invoke();
         Assert.True(WaitFor(() => table.FindFirstDescendant(cf => cf.ByText("Alpha Tool")) is null));
@@ -109,6 +112,24 @@ public sealed class PackManUiTests
             .Patterns.SelectionItem.Pattern.Select();
         Assert.True(WaitFor(() => details.FindAllDescendants().Any(e => e.Name.Contains("requested 2.0.0"))));
         Capture(details, "update-history.png");
+    }
+
+    [Fact]
+    [Trait("Category", "UI")]
+    public void SearchFiltersDisplayedRowsWithoutChangingUpdateSelection()
+    {
+        using var session = Launch("updates");
+        session.Button("scanCancelButton").Invoke();
+        Assert.True(WaitFor(() => session.Window.FindFirstDescendant(cf => cf.ByText("Alpha Tool")) is not null));
+        var search = session.Window.FindFirstDescendant(cf => cf.ByAutomationId("packageSearch"))!.AsTextBox();
+        search.Text = "alpha npm";
+        Assert.True(WaitFor(() => session.Window.FindFirstDescendant(cf => cf.ByText("Alpha Tool")) is not null
+            && session.Window.FindFirstDescendant(cf => cf.ByText("Beta Tool")) is null));
+        Assert.Contains("2", session.Button("updateSelectedButton").Name);
+        search.Text = "missing";
+        Assert.True(WaitFor(() => session.Window.FindFirstDescendant(cf => cf.ByText("No packages match your search.")) is not null));
+        search.Text = "";
+        Assert.True(WaitFor(() => session.Window.FindFirstDescendant(cf => cf.ByText("Beta Tool")) is not null));
     }
 
     [Fact]

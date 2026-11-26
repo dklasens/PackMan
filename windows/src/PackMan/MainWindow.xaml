@@ -44,6 +44,9 @@
                         <MenuItem Header="Selection">
                             <MenuItem Header="Select All Updates" Command="{Binding SelectAllCommand}" />
                             <MenuItem Header="Select None" Command="{Binding SelectNoneCommand}" />
+                            <Separator />
+                            <MenuItem Header="Select Visible Updates" Command="{Binding SelectVisibleCommand}" />
+                            <MenuItem Header="Deselect Visible Updates" Command="{Binding DeselectVisibleCommand}" />
                         </MenuItem>
                         <MenuItem Header="Activity" AutomationProperties.AutomationId="activityMenu">
                             <MenuItem Header="Package details" AutomationProperties.AutomationId="detailsMenuItem" Click="Details_Click" />
@@ -112,8 +115,14 @@
             </Border>
 
             <Grid Grid.Row="4" Margin="16,0,16,8">
+                <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                <DockPanel Margin="0,0,0,8" LastChildFill="False">
+                    <ui:TextBox AutomationProperties.AutomationId="packageSearch" PlaceholderText="Search name, ID, source or status"
+                                Width="270" Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged, Delay=150}" />
+                    <TextBlock Text="{Binding SearchSummary}" VerticalAlignment="Center" Margin="12,0,0,0" />
+                </DockPanel>
                 <DataGrid x:Name="UpdatesGrid" AutomationProperties.AutomationId="updatesTable" ItemsSource="{Binding PackagesView}"
-                          Visibility="{Binding HasPackages, Converter={StaticResource BoolToVis}}"
+                          Grid.Row="1" Visibility="{Binding HasVisiblePackages, Converter={StaticResource BoolToVis}}"
                           AutoGenerateColumns="False" CanUserAddRows="False" CanUserDeleteRows="False"
                           SelectionMode="Extended" SelectionUnit="FullRow" HeadersVisibility="Column"
                           GridLinesVisibility="Horizontal" RowHeight="34" ColumnHeaderHeight="36"
@@ -174,7 +183,7 @@
                     </DataGrid.Columns>
                 </DataGrid>
 
-                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="480"
+                <StackPanel Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="480"
                             Visibility="{Binding HasPackages, Converter={StaticResource InverseBoolToVis}}">
                     <TextBlock Text="◫" FontSize="46" HorizontalAlignment="Center" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
                     <TextBlock Text="{Binding EmptyTitle}" FontSize="24" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,10,0,6" />
@@ -183,6 +192,8 @@
                     <ui:Button Content="Scan" Command="{Binding ScanOrCancelCommand}" Appearance="Primary"
                                HorizontalAlignment="Center" Padding="18,7" Margin="0,16,0,0" />
                 </StackPanel>
+                <TextBlock Grid.Row="1" Text="No packages match your search." HorizontalAlignment="Center" VerticalAlignment="Center"
+                           Visibility="{Binding HasNoSearchMatches, Converter={StaticResource BoolToVis}}" />
             </Grid>
 
             <GridSplitter Grid.Row="5" Height="5" HorizontalAlignment="Stretch" Background="Transparent"

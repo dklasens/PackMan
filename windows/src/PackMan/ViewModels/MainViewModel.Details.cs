@@ -9,12 +9,30 @@ namespace PackMan.ViewModels;
 
 public partial class MainViewModel
 {
+    private ActivityWindow? _activityWindow;
+
     [RelayCommand]
     private void ShowPackageDetails(PackageUpdate? package)
     {
         if (package is null) return;
         SelectedPackage = package;
-        new ActivityWindow(this) { Owner = System.Windows.Application.Current?.MainWindow }.Show();
+        OpenActivityWindow();
+    }
+
+    internal void OpenActivityWindow(bool history = false)
+    {
+        if (_activityWindow is { } existing)
+        {
+            existing.SelectTab(history);
+            if (existing.WindowState == System.Windows.WindowState.Minimized)
+                existing.WindowState = System.Windows.WindowState.Normal;
+            existing.Activate();
+            return;
+        }
+        var window = new ActivityWindow(this, history) { Owner = System.Windows.Application.Current?.MainWindow };
+        _activityWindow = window;
+        window.Closed += (_, _) => { if (ReferenceEquals(_activityWindow, window)) _activityWindow = null; };
+        window.Show();
     }
     [RelayCommand]
     private void CancelOperation()
@@ -25,7 +43,7 @@ public partial class MainViewModel
     [RelayCommand]
     private void LoadPackageLinks(PackageUpdate? package)
     {
-        if (IsBusy || package?.HasExactIdentity != true || _metadata is null) return;
+        if (IsBusy || package?.HasExactIdentity != true || !IsCurrentPackage(package) || _metadata is null) return;
         StartOperation(async ct =>
         {
             Operation = AppOperationKind.InspectingPackage;
@@ -56,7 +74,7 @@ public partial class MainViewModel
     [RelayCommand]
     private void RetryUpdate(PackageUpdate? package)
     {
-        if (IsBusy || package?.IsActionable != true) return;
+        if (IsBusy || package?.IsActionable != true || !IsCurrentPackage(package)) return;
         package.FailureKind = null;
         StartUpdates([(package, false)]);
     }
@@ -64,14 +82,14 @@ public partial class MainViewModel
     [RelayCommand]
     private void VerifyAgain(PackageUpdate? package)
     {
-        if (IsBusy || package?.HasExactIdentity != true) return;
+        if (IsBusy || package?.HasExactIdentity != true || !IsCurrentPackage(package)) return;
         StartUpdates([(package, false)], verifyOnly: true);
     }
 
     [RelayCommand]
     private void UpdateInteractive(PackageUpdate? package)
     {
-        if (IsBusy || package?.IsActionable != true || !package.SupportsInteractive) return;
+        if (IsBusy || package?.IsActionable != true || !package.SupportsInteractive || !IsCurrentPackage(package)) return;
         package.FailureKind = null;
         StartUpdates([(package, false)], interactive: true);
     }
@@ -109,18 +127,35 @@ public partial class MainViewModel
         }
         try { _settings.IncludeUnknownVersions = value; }
         catch (Exception ex) { AppendLog($"Could not save unknown-version preference: {ex.Message}", LogLevel.Error); }
-        RemovePackages(SourceId.Winget);
-        ScanSummary = ScanSummaryKind.NotStarted;
+        if (SourceOptions.FirstOrDefault(option => option.Id == SourceId.Winget) is { } winget)
+            InvalidateSource(winget);
+        DeriveScanSummary(log: false);
         RefreshComputed();
     }
 
-    private void SaveHistory(UpdateHistoryEntry entry)
+    private Task SaveHistoryAsync(UpdateHistoryEntry entry) => SaveHistoryAsync([entry]);
+
+    private async Task SaveHistoryAsync(IEnumerable<UpdateHistoryEntry> entries)
     {
         try
         {
-            _history.Save(entry);
-            HistoryEntries.Clear();
-            foreach (var item in _history.Read()) HistoryEntries.Add(item);
+            await _history.SaveRangeAsync(entries.ToArray());
+            var snapshot = _history.Read();
+            var ids = snapshot.Select(item => item.Id).ToHashSet();
+            for (var i = HistoryEntries.Count - 1; i >= 0; i--)
+                if (!ids.Contains(HistoryEntries[i].Id)) HistoryEntries.RemoveAt(i);
+            for (var i = 0; i < snapshot.Count; i++)
+            {
+                if (i < HistoryEntries.Count && HistoryEntries[i] == snapshot[i]) continue;
+                var existing = HistoryEntries.FirstOrDefault(item => item.Id == snapshot[i].Id);
+                if (existing is null) HistoryEntries.Insert(i, snapshot[i]);
+                else
+                {
+                    var oldIndex = HistoryEntries.IndexOf(existing);
+                    if (oldIndex != i) HistoryEntries.Move(oldIndex, i);
+                    if (HistoryEntries[i] != snapshot[i]) HistoryEntries[i] = snapshot[i];
+                }
+            }
         }
         catch (Exception ex) { AppendLog($"Could not save update history: {ex.Message}", LogLevel.Warning); }
     }

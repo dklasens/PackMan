@@ -17,7 +17,8 @@ public sealed record ProcessInvocation(
     IReadOnlyList<string> Arguments,
     IReadOnlyDictionary<string, string>? Environment = null,
     TimeSpan? Timeout = null,
-    bool Elevated = false);
+    bool Elevated = false,
+    int? MaxCapturedOutputChars = null);
 
 public interface IProcessRunner
 {
@@ -30,6 +31,7 @@ public interface IProcessRunner
 public sealed class ProcessRunner(IElevationBroker elevationBroker) : IProcessRunner
 {
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromMinutes(3);
+    public const int DiagnosticCaptureLimit = 64_000;
 
     public Task<ProcessResult> RunAsync(ProcessInvocation invocation,
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default) =>
@@ -52,6 +54,7 @@ public sealed class ProcessRunner(IElevationBroker elevationBroker) : IProcessRu
     internal static async Task<ProcessResult> RunLocalAsync(ProcessInvocation invocation,
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var startInfo = CreateStartInfo(invocation);
         using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
         var stdout = new StringBuilder();
@@ -63,13 +66,13 @@ public sealed class ProcessRunner(IElevationBroker elevationBroker) : IProcessRu
         process.OutputDataReceived += (_, e) =>
         {
             if (e.Data is null) { stdoutClosed.TrySetResult(); return; }
-            lock (sync) stdout.AppendLine(e.Data);
+            lock (sync) AppendCaptured(stdout, e.Data, invocation.MaxCapturedOutputChars);
             output?.Report(new ProcessOutputEvent(ProcessOutputStream.StandardOutput, e.Data));
         };
         process.ErrorDataReceived += (_, e) =>
         {
             if (e.Data is null) { stderrClosed.TrySetResult(); return; }
-            lock (sync) stderr.AppendLine(e.Data);
+            lock (sync) AppendCaptured(stderr, e.Data, invocation.MaxCapturedOutputChars);
             output?.Report(new ProcessOutputEvent(ProcessOutputStream.StandardError, e.Data));
         };
 
@@ -79,7 +82,7 @@ public sealed class ProcessRunner(IElevationBroker elevationBroker) : IProcessRu
         }
         catch (Win32Exception ex)
         {
-            throw new SourceException(SourceIssueKind.Command,
+            throw new SourceException(SourceIssueKind.ToolStart,
                 $"Could not start '{Path.GetFileName(invocation.FileName)}': {ex.Message}",
                 ex.NativeErrorCode is 5 or 740);
         }
@@ -106,6 +109,13 @@ public sealed class ProcessRunner(IElevationBroker elevationBroker) : IProcessRu
 
         lock (sync)
             return new ProcessResult(process.ExitCode, stdout.ToString(), stderr.ToString());
+    }
+
+    private static void AppendCaptured(StringBuilder buffer, string line, int? limit)
+    {
+        buffer.AppendLine(line);
+        if (limit is > 0 && buffer.Length > limit.Value)
+            buffer.Remove(0, buffer.Length - limit.Value);
     }
 
     private static ProcessStartInfo CreateStartInfo(ProcessInvocation invocation)
@@ -160,4 +170,40 @@ public sealed class ProcessRunner(IElevationBroker elevationBroker) : IProcessRu
 internal sealed class DelegateProgress<T>(Action<T> callback) : IProgress<T>
 {
     public void Report(T value) => callback(value);
+}
+
+// Deliver command output in batches rather than posting one dispatcher operation per line.
+// An explicit flush at operation completion records the last lines before history is saved.
+internal sealed class BufferedProgress<T>(Action<T> callback) : IProgress<T>, IDisposable
+{
+    private readonly SynchronizationContext? _context = SynchronizationContext.Current;
+    private readonly object _sync = new();
+    private readonly Queue<T> _pending = new();
+    private bool _scheduled;
+
+    public void Report(T value)
+    {
+        lock (_sync)
+        {
+            if (_context is null) { callback(value); return; }
+            _pending.Enqueue(value);
+            if (_scheduled) return;
+            _scheduled = true;
+        }
+        _context.Post(_ => Flush(), null);
+    }
+
+    public void Flush()
+    {
+        T[] items;
+        lock (_sync)
+        {
+            items = _pending.ToArray();
+            _pending.Clear();
+            _scheduled = false;
+        }
+        foreach (var item in items) callback(item);
+    }
+
+    public void Dispose() => Flush();
 }

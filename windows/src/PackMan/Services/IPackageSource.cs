@@ -3,7 +3,7 @@ namespace PackMan.Services;
 public enum SourceId { Winget, Chocolatey, Scoop, Npm, Pip, Pipx, Dotnet }
 public enum ToolId { Winget, Chocolatey, Scoop, Npm, Node, Python, Pip, Pipx, Dotnet }
 public enum ToolResolutionOrigin { Custom, Path, KnownLocation, UserLocation, VersionManager }
-public enum SourceIssueKind { Unavailable, Command, Parsing, Network, Configuration, Verification }
+public enum SourceIssueKind { Unavailable, Command, Parsing, Network, Configuration, Verification, MissingPrerequisite, ToolStart }
 public enum SourcePhase { Probing, Refreshing, Scanning, Verifying }
 
 public sealed record SourceDescriptor(
@@ -43,6 +43,7 @@ public sealed record ToolContext(
 
 public sealed record SourceIssue(SourceIssueKind Kind, string Message, string? Recovery = null)
 {
+    public bool CanInstall => Kind is SourceIssueKind.Unavailable or SourceIssueKind.MissingPrerequisite;
     public string Id => $"{Kind}:{Message}";
 }
 

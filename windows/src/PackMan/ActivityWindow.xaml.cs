@@ -16,5 +16,6 @@ public partial class ActivityWindow : FluentWindow
     }
     private void Capture() => Services.UiTestEnvironment.CaptureWindow(this,
         ActivityTabs.SelectedIndex == 1 ? "update-history.png" : "package-details.png");
+    internal void SelectTab(bool history) => ActivityTabs.SelectedIndex = history ? 1 : 0;
     private void Close_Click(object sender, RoutedEventArgs e) => Close();
 }

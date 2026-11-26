@@ -81,23 +81,25 @@ public abstract class PackageSourceBase(IToolResolver resolver, IProcessRunner r
         };
     }
 
-    protected static void Validate(UpdateRequest request)
+    protected static void Validate(UpdateRequest request, Func<string?, bool>? validVersion = null)
     {
         if (!PackageIdValidator.IsValid(request.PackageId))
             throw new SourceException(SourceIssueKind.Configuration,
                 $"Refusing to update invalid package id '{request.PackageId}'.");
-        if (!PackageIdValidator.IsValidVersion(request.TargetVersion))
+        if (!(validVersion ?? PackageIdValidator.IsValidVersion)(request.TargetVersion))
             throw new SourceException(SourceIssueKind.Configuration,
                 $"Refusing to use invalid target version '{request.TargetVersion}'.");
         if (request.Repository is not null && !PackageIdValidator.IsValid(request.Repository))
             throw new SourceException(SourceIssueKind.Configuration, "The repository identity is invalid.");
     }
 
-    protected static UpdateVerification VerifyInstalled(string? installed, UpdateRequest request)
+    protected static UpdateVerification VerifyInstalled(string? installed, UpdateRequest request,
+        Func<string?, string?, int?>? compare = null)
     {
+        var comparison = (compare ?? SemanticVersion.Compare)(installed, request.TargetVersion);
         var satisfied = installed is not null && (string.Equals(installed, request.TargetVersion,
-            StringComparison.OrdinalIgnoreCase) || SemanticVersion.Compare(installed, request.TargetVersion) is >= 0);
-        var outdated = installed is not null && SemanticVersion.Compare(installed, request.TargetVersion) is < 0
+            StringComparison.OrdinalIgnoreCase) || comparison is >= 0);
+        var outdated = installed is not null && comparison is < 0
             ? new PackageInfo(request.PackageId, request.Name, installed, request.TargetVersion, Repository: request.Repository)
             : null;
         return new(satisfied, installed, outdated, Evidence: installed is null

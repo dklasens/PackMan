@@ -23,7 +23,8 @@ public partial class PackageUpdate : ObservableObject
     {
         SourceId.Winget when Repository == "msstore" => $"https://apps.microsoft.com/detail/{Uri.EscapeDataString(PackageId)}",
         SourceId.Npm => $"https://www.npmjs.com/package/{Uri.EscapeDataString(PackageId)}",
-        SourceId.Pip or SourceId.Pipx => $"https://pypi.org/project/{Uri.EscapeDataString(PackageId)}/",
+        SourceId.Pip => $"https://pypi.org/project/{Uri.EscapeDataString(PackageId)}/",
+        SourceId.Pipx => $"https://pypi.org/project/{Uri.EscapeDataString(Name)}/",
         SourceId.Dotnet => $"https://www.nuget.org/packages/{Uri.EscapeDataString(PackageId)}",
         SourceId.Chocolatey => $"https://community.chocolatey.org/packages/{Uri.EscapeDataString(PackageId)}",
         _ => null,

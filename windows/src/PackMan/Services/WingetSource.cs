@@ -104,7 +104,7 @@ public sealed class WingetSource(IToolResolver resolver, IProcessRunner runner, 
         {
             var matches = inventory.Where(row => row.Id.Equals(request.PackageId, StringComparison.OrdinalIgnoreCase)
                 && (request.Repository is null || row.Repository.Equals(request.Repository, StringComparison.OrdinalIgnoreCase))).ToList();
-            results[request.Identity] = matches.Count == 1 ? VerifyInstalled(matches[0].Version, request)
+            results[request.Identity] = matches.Count == 1 ? VerifyInstalled(matches[0].Version, request, PackageVersions.CompareWinget)
                 : new(false, Evidence: "WinGet did not return one unambiguous installed package.");
         }
         return results;

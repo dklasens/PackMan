@@ -50,7 +50,7 @@
                                 IsEnabled="{Binding SelectedPackage.IsActionable}" Margin="0,0,8,8" />
                             <ui:Button Content="Verify again" AutomationProperties.AutomationId="verifyAgainButton"
                                 Command="{Binding VerifyAgainCommand}" CommandParameter="{Binding SelectedPackage}" Margin="0,0,8,8"
-                                IsEnabled="{Binding SelectedPackage.HasExactIdentity}" />
+                                IsEnabled="{Binding CanVerifySelectedPackage}" />
                             <ui:Button Content="Interactive installer" Command="{Binding UpdateInteractiveCommand}" CommandParameter="{Binding SelectedPackage}"
                                 IsEnabled="{Binding SelectedPackage.IsActionable}" Visibility="{Binding SelectedPackage.SupportsInteractive, Converter={StaticResource BoolToVis}}" Margin="0,0,8,8" />
                             <ui:Button Content="Package page" Command="{Binding OpenPackagePageCommand}" CommandParameter="{Binding SelectedPackage}" Margin="0,0,8,8" />

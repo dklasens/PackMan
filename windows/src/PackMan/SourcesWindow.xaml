@@ -9,6 +9,7 @@
     <ui:FluentWindow.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVis" />
         <local:InverseBooleanConverter xmlns:local="clr-namespace:PackMan" x:Key="InverseBool" />
+        <local:IgnoreRuleDisplayConverter xmlns:local="clr-namespace:PackMan" x:Key="IgnoreRuleDisplay" />
     </ui:FluentWindow.Resources>
     <DockPanel>
         <ui:TitleBar DockPanel.Dock="Top" Title="Sources" />
@@ -80,7 +81,8 @@
                                             <ui:Button DockPanel.Dock="Right" Content="Stop Ignoring" Padding="10,2"
                                                        Command="{Binding DataContext.RemoveIgnoredCommand, ElementName=Root}"
                                                        CommandParameter="{Binding}" />
-                                            <TextBlock Text="{Binding}" FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" />
+                                            <TextBlock Text="{Binding Converter={StaticResource IgnoreRuleDisplay}}" TextWrapping="Wrap"
+                                                       FontFamily="Consolas" FontSize="12" VerticalAlignment="Center" />
                                         </DockPanel>
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>

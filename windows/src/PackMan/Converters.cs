@@ -24,3 +24,10 @@ public sealed class BindingProxy : Freezable
     public static readonly DependencyProperty DataProperty = DependencyProperty.Register(
         nameof(Data), typeof(object), typeof(BindingProxy));
 }
+
+public sealed class IgnoreRuleDisplayConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture) =>
+        value is string rule ? Services.IgnoreRuleKey.Display(rule) : string.Empty;
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => Binding.DoNothing;
+}

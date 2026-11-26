@@ -148,11 +148,11 @@ public sealed class ViewModelTests
         vm.IgnorePackageCommand.Execute(vm.Packages.First(p => p.PackageId == "a"));
         Assert.Single(vm.Packages);
         Assert.True(vm.HasIgnoredUpdates);
-        Assert.Contains("Npm:a", settings.GetIgnoredUpdates());
+        Assert.Contains(IgnoreRuleKey.Create(SourceId.Npm, null, "a"), settings.GetIgnoredUpdates());
         vm.ScanOrCancelCommand.Execute(null);
         await WaitUntilIdle(vm);
         Assert.Single(vm.Packages);
-        vm.RemoveIgnoredCommand.Execute("Npm:a");
+        vm.RemoveIgnoredCommand.Execute(IgnoreRuleKey.Create(SourceId.Npm, null, "a"));
         vm.ScanOrCancelCommand.Execute(null);
         await WaitUntilIdle(vm);
         Assert.Equal(2, vm.Packages.Count);

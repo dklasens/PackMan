@@ -15,6 +15,7 @@ public partial class MainWindow : FluentWindow
     private readonly DispatcherTimer _elapsedTimer;
     private bool _closingAfterCancellation;
     private bool _waitingToClose;
+    private bool _scrollPending;
 
     public MainWindow(MainViewModel viewModel)
     {
@@ -23,7 +24,12 @@ public partial class MainWindow : FluentWindow
         InitializeComponent();
         ((INotifyCollectionChanged)_viewModel.LogEntries).CollectionChanged += OnLogEntriesChanged;
         _elapsedTimer = new DispatcherTimer(TimeSpan.FromSeconds(1), DispatcherPriority.Background,
-            (_, _) => { foreach (var source in _viewModel.SourceOptions) source.Refresh(); }, Dispatcher);
+            (_, _) =>
+            {
+                foreach (var source in _viewModel.SourceOptions.Where(source =>
+                    source.State.Status is SourceScanStatus.Probing or SourceScanStatus.Scanning))
+                    source.RefreshElapsed();
+            }, Dispatcher);
         _elapsedTimer.Start();
     }
 
@@ -37,16 +43,23 @@ public partial class MainWindow : FluentWindow
     {
         _viewModel.SelectedPackage = (sender as FrameworkElement)?.DataContext as PackageUpdate
             ?? UpdatesGrid.SelectedItem as PackageUpdate;
-        new ActivityWindow(_viewModel) { Owner = this }.Show();
+        _viewModel.OpenActivityWindow();
     }
 
     private void History_Click(object sender, RoutedEventArgs e) =>
-        new ActivityWindow(_viewModel, history: true) { Owner = this }.Show();
+        _viewModel.OpenActivityWindow(history: true);
 
     private void OnLogEntriesChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
-        if (e.Action == NotifyCollectionChangedAction.Add && FollowLogCheck.IsChecked == true && _viewModel.LogEntries.Count > 0)
-            LogList.ScrollIntoView(_viewModel.LogEntries[^1]);
+        if (e.Action != NotifyCollectionChangedAction.Add || !_viewModel.IsLogVisible || FollowLogCheck.IsChecked != true || _scrollPending)
+            return;
+        _scrollPending = true;
+        _ = Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+        {
+            _scrollPending = false;
+            if (_viewModel.IsLogVisible && FollowLogCheck.IsChecked == true && _viewModel.LogEntries.Count > 0)
+                LogList.ScrollIntoView(_viewModel.LogEntries[^1]);
+        }));
     }
 
     protected override async void OnClosing(CancelEventArgs e)
@@ -67,6 +80,7 @@ public partial class MainWindow : FluentWindow
             return;
         }
         _elapsedTimer.Stop();
+        ((INotifyCollectionChanged)_viewModel.LogEntries).CollectionChanged -= OnLogEntriesChanged;
         base.OnClosing(e);
     }
 }

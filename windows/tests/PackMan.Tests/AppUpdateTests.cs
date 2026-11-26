@@ -63,6 +63,17 @@ public sealed class AppUpdateTests
     }
 
     [Fact]
+    public async Task NewerMacOnlyReleaseDoesNotHideLatestWindowsRelease()
+    {
+        var service = new AppUpdateService(ApiClient(
+            ReleaseJson("102.0", includeWindowsAssets: false),
+            ReleaseJson("98.0"),
+            ReleaseJson("101.0", prerelease: true),
+            ReleaseJson("99.0")), new MemorySettings());
+        Assert.Equal("99.0", (await service.CheckAsync(force: true))!.Version);
+    }
+
+    [Fact]
     public async Task NoReleasesAtAllReturnsNull()
     {
         var client = new HttpClient(new StubHttpHandler(_ =>
@@ -357,8 +368,8 @@ public sealed class AppUpdateTests
         return process.Id;
     }
 
-    private static HttpClient ApiClient(string releaseJson) => new(new StubHttpHandler(uri =>
-        new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(releaseJson, Encoding.UTF8) }));
+    private static HttpClient ApiClient(params string[] releaseJson) => new(new StubHttpHandler(uri =>
+        new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("[" + string.Join(",", releaseJson) + "]", Encoding.UTF8) }));
 
     private static string ReleaseJson(string tag, bool draft = false, bool prerelease = false,
         bool includeWindowsAssets = true)

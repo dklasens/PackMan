@@ -27,6 +27,7 @@ public sealed class SettingsService : ISettingsService
     private readonly object _sync = new();
     private readonly string _settingsPath;
     private SettingsData _data = new();
+    internal static readonly TimeSpan ToolCacheLifetime = TimeSpan.FromHours(4);
     public string? LoadIssue { get; private set; }
     public bool IncludeUnknownVersions
     {
@@ -79,6 +80,13 @@ public sealed class SettingsService : ISettingsService
         {
             if (!_data.CachedTools.TryGetValue(id.ToString(), out var cached)) return null;
             if (string.IsNullOrWhiteSpace(cached.Path) || !File.Exists(cached.Path)) return null;
+            try
+            {
+                if (cached.CheckedAt is not { } checkedAt || DateTimeOffset.UtcNow - checkedAt >= ToolCacheLifetime
+                    || checkedAt > DateTimeOffset.UtcNow || cached.LastWriteUtc != File.GetLastWriteTimeUtc(cached.Path)
+                    || cached.Length != new FileInfo(cached.Path).Length || cached.PathFingerprint != PathFingerprint()) return null;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
             if (!Enum.TryParse<ToolResolutionOrigin>(cached.Origin, true, out var origin))
                 origin = ToolResolutionOrigin.Custom;
             return new ToolContext(cached.Path,
@@ -99,6 +107,10 @@ public sealed class SettingsService : ISettingsService
                 Origin = context.Origin.ToString(),
                 PathEntries = context.PathEntries.ToList(),
                 PrefixArguments = context.PrefixArguments?.ToList(),
+                CheckedAt = DateTimeOffset.UtcNow,
+                LastWriteUtc = File.Exists(context.ExecutablePath) ? File.GetLastWriteTimeUtc(context.ExecutablePath) : null,
+                Length = File.Exists(context.ExecutablePath) ? new FileInfo(context.ExecutablePath).Length : null,
+                PathFingerprint = PathFingerprint(),
             };
             SaveLocked();
         }
@@ -201,7 +213,7 @@ public sealed class SettingsService : ISettingsService
 
     private void Normalize()
     {
-        _data.Version = 5;
+        _data.Version = 6;
         _data.DisabledSources ??= [];
         _data.ExecutableOverrides ??= new(StringComparer.OrdinalIgnoreCase);
         _data.CachedTools ??= new(StringComparer.OrdinalIgnoreCase);
@@ -213,7 +225,7 @@ public sealed class SettingsService : ISettingsService
         var directory = Path.GetDirectoryName(_settingsPath)!;
         Directory.CreateDirectory(directory);
         var temporary = _settingsPath + ".tmp";
-        _data.Version = 5;
+        _data.Version = 6;
         File.WriteAllText(temporary, JsonSerializer.Serialize(_data, JsonOptions));
         File.Move(temporary, _settingsPath, true);
         LoadIssue = null;
@@ -233,6 +245,8 @@ public sealed class SettingsService : ISettingsService
         PropertyNameCaseInsensitive = true,
         WriteIndented = true,
     };
+    private static string PathFingerprint() => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+        System.Text.Encoding.UTF8.GetBytes(Environment.GetEnvironmentVariable("PATH") ?? "")));
     private static string DefaultSettingsPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "PackMan", "settings.json");
     private static string LegacySettingsPath => Path.Combine(
@@ -241,7 +255,7 @@ public sealed class SettingsService : ISettingsService
     private sealed class SettingsData
     {
         public bool IncludeUnknownVersions { get; set; }
-        public int Version { get; set; } = 5;
+        public int Version { get; set; } = 6;
         public List<string> DisabledSources { get; set; } = [];
         public Dictionary<string, string> ExecutableOverrides { get; set; } = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, CachedToolData> CachedTools { get; set; } = new(StringComparer.OrdinalIgnoreCase);
@@ -264,6 +278,10 @@ public sealed class SettingsService : ISettingsService
         public string? Origin { get; set; }
         public List<string>? PathEntries { get; set; }
         public List<string>? PrefixArguments { get; set; }
+        public DateTimeOffset? CheckedAt { get; set; }
+        public DateTime? LastWriteUtc { get; set; }
+        public long? Length { get; set; }
+        public string? PathFingerprint { get; set; }
     }
     private sealed class LegacySettingsData { public List<string>? DisabledSources { get; set; } }
 }

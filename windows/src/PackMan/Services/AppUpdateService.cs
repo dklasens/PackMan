@@ -19,7 +19,7 @@ public interface IAppUpdateService
 
 public sealed class AppUpdateService(HttpClient httpClient, ISettingsService settings) : IAppUpdateService
 {
-    internal static readonly Uri LatestReleaseUri = new("https://api.github.com/repos/dklasens/PackMan/releases/latest");
+    internal const string ReleasesUrl = "https://api.github.com/repos/dklasens/PackMan/releases";
     internal const string ZipAssetName = "PackMan-Windows-x64.zip";
     internal const string ChecksumAssetName = ZipAssetName + ".sha256";
     private static readonly TimeSpan CheckThrottle = TimeSpan.FromHours(24);
@@ -57,15 +57,34 @@ public sealed class AppUpdateService(HttpClient httpClient, ISettingsService set
 
     private async Task<AppUpdateInfo?> FetchLatestReleaseAsync(CancellationToken cancellationToken)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, LatestReleaseUri);
-        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
-        request.Headers.TryAddWithoutValidation("User-Agent", "PackMan");
-        using var response = await httpClient.SendAsync(request, cancellationToken);
-        if (response.StatusCode == HttpStatusCode.NotFound) return null;
-        if (response.StatusCode != HttpStatusCode.OK)
-            throw new HttpRequestException($"GitHub returned HTTP {(int)response.StatusCode} while checking for updates.");
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        var release = await JsonSerializer.DeserializeAsync<GitHubRelease>(stream, cancellationToken: cancellationToken);
+        // Independent platform releases mean the repository-wide latest tag may be Mac-only.
+        AppUpdateInfo? latest = null;
+        const int pageSize = 100;
+        for (var page = 1; ; page++)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, $"{ReleasesUrl}?per_page={pageSize}&page={page}");
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+            request.Headers.TryAddWithoutValidation("User-Agent", "PackMan");
+            using var response = await httpClient.SendAsync(request, cancellationToken);
+            if (response.StatusCode == HttpStatusCode.NotFound) return latest;
+            if (response.StatusCode != HttpStatusCode.OK)
+                throw new HttpRequestException($"GitHub returned HTTP {(int)response.StatusCode} while checking for updates.");
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            var releases = await JsonSerializer.DeserializeAsync<List<GitHubRelease>>(stream, cancellationToken: cancellationToken)
+                ?? throw new JsonException("GitHub returned no release inventory.");
+            foreach (var release in releases)
+            {
+                var candidate = GetWindowsRelease(release);
+                if (candidate is not null && (latest is null
+                    || Version.Parse(candidate.Version) > Version.Parse(latest.Version)))
+                    latest = candidate;
+            }
+            if (releases.Count < pageSize) return latest;
+        }
+    }
+
+    private static AppUpdateInfo? GetWindowsRelease(GitHubRelease? release)
+    {
         if (release is null || release.Draft || release.Prerelease) return null;
         var tag = release.TagName?.Trim().TrimStart('v', 'V');
         if (string.IsNullOrWhiteSpace(tag) || !Version.TryParse(tag, out var version)) return null;

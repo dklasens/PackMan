@@ -35,7 +35,7 @@ public sealed class DotnetSource(IToolResolver resolver, IProcessRunner runner, 
             var sdkLine = result.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries)
                 .Select(line => line.Trim()).LastOrDefault();
             if (string.IsNullOrWhiteSpace(sdkLine))
-                return SourceProbe.Unavailable(new SourceIssue(SourceIssueKind.Configuration,
+                return SourceProbe.Unavailable(new SourceIssue(SourceIssueKind.MissingPrerequisite,
                     "The .NET runtime is installed, but no .NET SDK is installed for global tool management.",
                     "Install a .NET SDK or disable .NET Tools in Sources."));
 
@@ -61,6 +61,17 @@ public sealed class DotnetSource(IToolResolver resolver, IProcessRunner runner, 
         var parsed = DotnetToolListParser.Parse(result.StdOut);
         var updates = new List<PackageInfo>();
         var issues = new List<SourceIssue>(parsed.Issues);
+        if (parsed.Tools.Count == 0) return new(updates, issues);
+        var feeds = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
+            Arguments(context, "nuget", "list", "source", "--format", "Short"), InventoryEnvironment(context),
+            TimeSpan.FromSeconds(30)), cancellationToken: cancellationToken);
+        if (!feeds.Success || !HasOnlyPublicNuGetFeed(feeds.StdOut))
+        {
+            issues.Add(new(SourceIssueKind.Configuration,
+                "The configured NuGet sources could not be confirmed as nuget.org only.",
+                "Check for updates using the configured .NET tool feed; PackMan does not substitute a public feed for a private one."));
+            return new(updates, issues);
+        }
         using var gate = new SemaphoreSlim(4, 4);
         var lookups = await Task.WhenAll(parsed.Tools.Select(async tool =>
         {
@@ -81,6 +92,19 @@ public sealed class DotnetSource(IToolResolver resolver, IProcessRunner runner, 
     private static IReadOnlyDictionary<string, string> InventoryEnvironment(ToolContext context) =>
         new Dictionary<string, string>(context.Environment) { ["DOTNET_CLI_UI_LANGUAGE"] = "en-US" };
 
+    internal static bool HasOnlyPublicNuGetFeed(string output)
+    {
+        var enabled = new List<string>();
+        foreach (var line in output.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (line.StartsWith("D ", StringComparison.Ordinal)) continue;
+            if (!line.StartsWith("E ", StringComparison.Ordinal)) return false;
+            enabled.Add(line[2..].Trim());
+        }
+        return enabled.Count == 1 && enabled[0].TrimEnd('/').Equals("https://api.nuget.org/v3/index.json",
+            StringComparison.OrdinalIgnoreCase);
+    }
+
     public override async Task<IReadOnlyDictionary<string, UpdateVerification>> VerifyAsync(
         IReadOnlyList<UpdateRequest> requests, ToolContext context, CancellationToken cancellationToken = default)
     {
@@ -92,7 +116,7 @@ public sealed class DotnetSource(IToolResolver resolver, IProcessRunner runner, 
         if (parsed.Issues.Count > 0)
             throw new SourceException(SourceIssueKind.Verification, string.Join("; ", parsed.Issues.Select(i => i.Message)));
         return requests.ToDictionary(r => r.Identity, r => VerifyInstalled(parsed.Tools.FirstOrDefault(p =>
-            p.Id.Equals(r.PackageId, StringComparison.OrdinalIgnoreCase)).Version, r), StringComparer.OrdinalIgnoreCase);
+            p.Id.Equals(r.PackageId, StringComparison.OrdinalIgnoreCase)).Version, r, PackageVersions.CompareNuGet), StringComparer.OrdinalIgnoreCase);
     }
 
     public override async Task<string> ClearCacheAsync(ToolContext context,
@@ -111,7 +135,7 @@ public sealed class DotnetSource(IToolResolver resolver, IProcessRunner runner, 
         Validate(request);
         var result = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
             Arguments(context, "tool", "update", "--global", request.PackageId, "--version", request.TargetVersion),
-            context.Environment, TimeSpan.FromMinutes(15), request.Elevated), output, cancellationToken);
+            context.Environment, TimeSpan.FromMinutes(15), request.Elevated, ProcessRunner.DiagnosticCaptureLimit), output, cancellationToken);
         if (!result.Success) throw SourceSupport.CommandFailure("dotnet tool update", result);
         return new();
     }
@@ -130,13 +154,16 @@ public sealed class DotnetSource(IToolResolver resolver, IProcessRunner runner, 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             var payload = await JsonSerializer.DeserializeAsync<NuGetVersionIndex>(stream, cancellationToken: cancellationToken);
             var versions = payload?.Versions ?? [];
-            var latest = versions.LastOrDefault(v => !v.Contains('-')) ?? versions.LastOrDefault();
+            var latest = versions.Where(v => !v.Contains('-'))
+                .Aggregate((string?)null, (best, v) => best is null || PackageVersions.CompareNuGet(v, best) > 0 ? v : best)
+                ?? versions.Aggregate((string?)null, (best, v) => best is null || PackageVersions.CompareNuGet(v, best) > 0 ? v : best);
             if (string.IsNullOrWhiteSpace(latest)) return (null, new(SourceIssueKind.Parsing, $"{id}: nuget.org returned no versions."));
-            if (string.Equals(latest, currentVersion, StringComparison.OrdinalIgnoreCase)) return (null, null);
-            if (System.Version.TryParse(latest, out var latestParsed)
-                && System.Version.TryParse(currentVersion, out var currentParsed)
-                && latestParsed <= currentParsed) return (null, null);
-            return (new(id, id, currentVersion, latest), null);
+            var comparison = PackageVersions.CompareNuGet(latest, currentVersion);
+            if (comparison is null) return (null, new(SourceIssueKind.Parsing, $"{id}: NuGet versions could not be compared."));
+            if (!versions.Any(v => PackageVersions.CompareNuGet(v, currentVersion) == 0))
+                return (null, new(SourceIssueKind.Configuration, $"{id}: installed version is not present on nuget.org; check its configured source."));
+            if (comparison <= 0) return (null, null);
+            return (new(id, id, currentVersion, latest, "Version candidate from nuget.org; verify it matches your configured package source."), null);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

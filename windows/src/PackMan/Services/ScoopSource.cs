@@ -73,7 +73,10 @@ public sealed class ScoopSource(IToolResolver resolver, IProcessRunner runner) :
             Arguments(context, "status"), context.Environment, TimeSpan.FromMinutes(5)), cancellationToken: cancellationToken);
         if (!result.Success) throw SourceSupport.CommandFailure("scoop status", result);
         var parsed = ScoopStatusParser.Parse(result.StdOut);
-        return new(parsed.Updates, parsed.Issues);
+        var issues = parsed.Issues.ToList();
+        if (!string.IsNullOrWhiteSpace(result.StdErr))
+            issues.Add(new(SourceIssueKind.Command, "Scoop reported a diagnostic during its status check.", SourceSupport.ErrorText(result)));
+        return new(parsed.Updates, issues);
     }
 
     public override async Task<UpdateResult> UpdateAsync(UpdateRequest request, ToolContext context,
@@ -81,7 +84,8 @@ public sealed class ScoopSource(IToolResolver resolver, IProcessRunner runner) :
     {
         Validate(request);
         var result = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
-            Arguments(context, "update", request.PackageId), context.Environment, TimeSpan.FromMinutes(15), request.Elevated),
+            Arguments(context, "update", request.PackageId), context.Environment, TimeSpan.FromMinutes(15), request.Elevated,
+            ProcessRunner.DiagnosticCaptureLimit),
             output, cancellationToken);
         if (!result.Success) throw SourceSupport.CommandFailure("scoop update", result);
         return new();
@@ -97,16 +101,24 @@ public static class ScoopStatusParser
         var updates = new List<PackageInfo>();
         var issues = new List<SourceIssue>();
         var inTable = false;
+        var recognizedEmpty = false;
         foreach (var raw in output.Split('\n'))
         {
             var line = Regex.Replace(raw.TrimEnd('\r'), @"\x1B\[[0-9;?]*[A-Za-z]", string.Empty).Trim();
             if (string.IsNullOrWhiteSpace(line)) continue;
+            if (line.Equals("Everything is ok!", StringComparison.OrdinalIgnoreCase)) { recognizedEmpty = true; continue; }
+            if (line.Contains("out of date", StringComparison.OrdinalIgnoreCase) && line.Contains("Scoop", StringComparison.OrdinalIgnoreCase))
+            {
+                issues.Add(new(SourceIssueKind.Configuration, "Scoop or its buckets need refreshing; results may be stale.", "Run scoop update and scan again."));
+                continue;
+            }
             if (line.StartsWith("Name", StringComparison.OrdinalIgnoreCase)
                 && line.Contains("Version", StringComparison.OrdinalIgnoreCase)) { inTable = true; continue; }
             if (line.All(c => c is '-' or ' ')) continue;
             if (!inTable) continue;
             var parts = Regex.Split(line, @"\s{2,}").Where(x => !string.IsNullOrWhiteSpace(x)).ToArray();
-            if (parts.Length < 3 || !PackageIdValidator.IsValid(parts[0]))
+            if (parts.Length < 3 || !PackageIdValidator.IsValid(parts[0])
+                || !PackageIdValidator.IsValidVersion(parts[1]) || !PackageIdValidator.IsValidVersion(parts[2]))
             {
                 issues.Add(new(SourceIssueKind.Parsing, "Scoop returned a package record that could not be parsed."));
                 continue;
@@ -115,6 +127,8 @@ public static class ScoopStatusParser
             if (info.Contains("hold", StringComparison.OrdinalIgnoreCase)) continue;
             updates.Add(new(parts[0], parts[0], parts[1], parts[2]));
         }
+        if (!inTable && !recognizedEmpty)
+            issues.Add(new(SourceIssueKind.Parsing, "Scoop did not return a recognized status table or clean result."));
         return new(updates, issues.DistinctBy(i => i.Id).ToList());
     }
 }

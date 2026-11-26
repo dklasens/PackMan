@@ -36,6 +36,8 @@ public sealed class PipSource(IToolResolver resolver, IProcessRunner runner) : P
     {
         var candidates = new List<ResolvedTool>();
         var pyResolution = await Resolver.ResolveAsync(Descriptor, cancellationToken);
+        if (pyResolution.Tool is null && pyResolution.Issue?.Kind == SourceIssueKind.Configuration)
+            return SourceProbe.Unavailable(pyResolution.Issue);
         if (pyResolution.Tool is not null) candidates.Add(pyResolution.Tool);
         var pythonResolution = await Resolver.ResolveAsync(
             Descriptor with { ExecutableName = "python", KnownPaths = PythonPaths() }, cancellationToken);
@@ -93,11 +95,18 @@ public sealed class PipSource(IToolResolver resolver, IProcessRunner runner) : P
             context.Environment, TimeSpan.FromMinutes(3)), cancellationToken: cancellationToken);
         if (!result.Success) throw SourceSupport.CommandFailure("pip list", result);
         List<PipEntry> entries;
-        try { entries = string.IsNullOrWhiteSpace(result.StdOut) ? [] : JsonSerializer.Deserialize<List<PipEntry>>(result.StdOut) ?? []; }
+        try { entries = JsonSerializer.Deserialize<List<PipEntry>>(result.StdOut)
+            ?? throw new JsonException("Expected a package array."); }
         catch (JsonException ex) { throw new SourceException(SourceIssueKind.Parsing, $"pip JSON could not be parsed: {ex.Message}"); }
-        var invalid = entries.Count(e => !PackageIdValidator.IsValid(e.Name));
-        var issues = invalid == 0 ? [] : new[] { new SourceIssue(SourceIssueKind.Parsing, $"pip returned {invalid} invalid package record(s).") };
-        return new(entries.Where(e => PackageIdValidator.IsValid(e.Name))
+        static bool Valid(PipEntry? entry) => entry is not null && PackageIdValidator.IsValid(entry.Name)
+            && PackageVersions.IsPythonVersion(entry.Version) && PackageVersions.IsPythonVersion(entry.LatestVersion);
+        var invalid = entries.Count(e => !Valid(e));
+        var issues = new List<SourceIssue>();
+        if (invalid > 0) issues.Add(new(SourceIssueKind.Parsing, $"pip returned {invalid} invalid package record(s)."));
+        if (result.StdErr.Contains("ERROR", StringComparison.OrdinalIgnoreCase)
+            || result.StdErr.Contains("WARNING: Retrying", StringComparison.OrdinalIgnoreCase))
+            issues.Add(new(SourceIssueKind.Network, "pip reported an incomplete index check."));
+        return new(entries.Where(Valid).Where(e => PackageVersions.ComparePython(e.LatestVersion, e.Version) is > 0)
             .Select(e => new PackageInfo(e.Name!, e.Name!, e.Version ?? string.Empty, e.LatestVersion ?? string.Empty)).ToList(), issues);
     }
 
@@ -115,7 +124,7 @@ public sealed class PipSource(IToolResolver resolver, IProcessRunner runner) : P
             var installed = JsonSerializer.Deserialize<List<PipEntry>>(result.StdOut)
                 ?? throw new JsonException("No installed inventory was returned.");
             return requests.ToDictionary(r => r.Identity, r => VerifyInstalled(installed.FirstOrDefault(p =>
-                NormalizeName(p.Name) == NormalizeName(r.PackageId))?.Version, r), StringComparer.OrdinalIgnoreCase);
+                NormalizeName(p.Name) == NormalizeName(r.PackageId))?.Version, r, PackageVersions.ComparePython), StringComparer.OrdinalIgnoreCase);
         }
         catch (JsonException ex) { throw new SourceException(SourceIssueKind.Verification, $"pip inventory could not be read: {ex.Message}"); }
     }
@@ -136,7 +145,7 @@ public sealed class PipSource(IToolResolver resolver, IProcessRunner runner) : P
     public override async Task<UpdateResult> UpdateAsync(UpdateRequest request, ToolContext context,
         IProgress<ProcessOutputEvent>? output = null, CancellationToken cancellationToken = default)
     {
-        Validate(request);
+        Validate(request, PackageVersions.IsPythonVersion);
         var dependents = await FindInstalledDependentsAsync(request.PackageId, context, cancellationToken);
         var requirements = new[] { $"{request.PackageId}=={request.TargetVersion}" }
             .Concat(dependents.Select(item => $"{item.Name}=={item.Version}"))
@@ -171,7 +180,7 @@ public sealed class PipSource(IToolResolver resolver, IProcessRunner runner) : P
                 ? []
                 : JsonSerializer.Deserialize<List<PipDependent>>(result.StdOut) ?? [];
             if (dependents.Any(item => !PackageIdValidator.IsValid(item.Name)
-                || !PackageIdValidator.IsValidVersion(item.Version)))
+                || !PackageVersions.IsPythonVersion(item.Version)))
             {
                 throw new SourceException(SourceIssueKind.Parsing,
                     "Installed pip dependency metadata contained an invalid name or version, so the update was not attempted.");

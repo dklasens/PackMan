@@ -28,7 +28,8 @@ public partial class SourceOptionViewModel : ObservableObject
     [ObservableProperty] private string? _executableOverride;
 
     public bool HasIssue => IsEnabled && State.HasIssue;
-    public bool CanInstall => _installOffered && State.Status == SourceScanStatus.Unavailable;
+    public bool CanInstall => _installOffered && IsEnabled && State.Status == SourceScanStatus.Unavailable
+        && (ProbeIssue ?? State.Issues.FirstOrDefault())?.CanInstall == true;
     public string? ExecutablePath => ToolContext?.ExecutablePath ?? ExecutableOverride;
     public string VersionAndOrigin => ToolContext is null ? string.Empty : $"{ToolContext.Version} • {OriginText(ToolContext.Origin)}";
     public string StatusText => State.Status switch
@@ -45,7 +46,12 @@ public partial class SourceOptionViewModel : ObservableObject
         },
         SourceScanStatus.Succeeded => $"Available • {State.UpdateCount} update{(State.UpdateCount == 1 ? "" : "s")}",
         SourceScanStatus.Partial => $"Partial • {State.UpdateCount} update{(State.UpdateCount == 1 ? "" : "s")}",
-        SourceScanStatus.Unavailable => "Not available",
+        SourceScanStatus.Unavailable => ProbeIssue?.Kind switch
+        {
+            SourceIssueKind.Configuration => "Configuration needs attention",
+            SourceIssueKind.MissingPrerequisite => "Missing prerequisite",
+            _ => "Not available",
+        },
         SourceScanStatus.Failed => "Scan failed",
         SourceScanStatus.Cancelled => "Cancelled",
         _ => State.Status.ToString(),
@@ -56,6 +62,8 @@ public partial class SourceOptionViewModel : ObservableObject
         ? $" • {(int)(DateTimeOffset.Now - started).TotalMinutes}:{(DateTimeOffset.Now - started).Seconds:00}" : string.Empty;
     public bool HasOverride => !string.IsNullOrWhiteSpace(ExecutableOverride);
     public bool ShowInstallationHelp => Descriptor.InstallationUrl is not null && (ProbeIssue is not null || State.Status == SourceScanStatus.Unavailable);
+
+    public void RefreshElapsed() => OnPropertyChanged(nameof(ElapsedText));
 
     public void Refresh()
     {

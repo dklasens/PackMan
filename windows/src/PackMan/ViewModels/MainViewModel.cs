@@ -26,6 +26,9 @@ public partial class MainViewModel : ObservableObject
     private long _nextLogId;
     private bool _isCheckingForUpdates;
     private readonly Dictionary<string, string> _lastOutput = [];
+    private bool _batchSelection;
+    private bool _revertingSourceChange;
+    private string[] _searchTerms = [];
 
     public MainViewModel(IEnumerable<IPackageSource> sources, ISettingsService settings,
         ISourceInstaller installer, IAppUpdateService? updater = null, IUpdateHistoryStore? history = null,
@@ -46,6 +49,7 @@ public partial class MainViewModel : ObservableObject
             installer.HasPlan(source.Id))));
         foreach (var option in SourceOptions) option.PropertyChanged += OnSourceOptionChanged;
         PackagesView = CollectionViewSource.GetDefaultView(Packages);
+        PackagesView.Filter = item => item is PackageUpdate package && MatchesSearch(package);
         PackagesView.SortDescriptions.Add(new SortDescription(nameof(PackageUpdate.Source), ListSortDirection.Ascending));
         PackagesView.SortDescriptions.Add(new SortDescription(nameof(PackageUpdate.Name), ListSortDirection.Ascending));
         if (settings.LoadIssue is { } issue) AppendLog(issue, LogLevel.Warning);
@@ -65,6 +69,7 @@ public partial class MainViewModel : ObservableObject
     public string UpdateSummaryText => UpdateSummary?.DisplayText ?? string.Empty;
     [ObservableProperty] private bool _includeUnknownVersions;
     [ObservableProperty] private PackageUpdate? _selectedPackage;
+    [ObservableProperty] private string _searchText = string.Empty;
     public bool HasIgnoredUpdates => IgnoredUpdates.Count > 0;
 
     [ObservableProperty] private AppOperationKind _operation = AppOperationKind.Idle;
@@ -82,12 +87,19 @@ public partial class MainViewModel : ObservableObject
     public bool IsApplyingAppUpdate => Operation == AppOperationKind.UpdatingApp;
     public int UpdateCount => Packages.Count(p => p.IsActionable);
     public int SelectedCount => Packages.Count(p => p.IsActionable && p.IsSelected);
+    public int VisibleCount => PackagesView.Cast<PackageUpdate>().Count();
+    public int VisibleSelectedCount => PackagesView.Cast<PackageUpdate>().Count(p => p.IsActionable && p.IsSelected);
+    public bool HasVisiblePackages => VisibleCount > 0;
+    public bool HasNoSearchMatches => HasPackages && !HasVisiblePackages;
+    public string SearchSummary => $"{VisibleCount} of {Packages.Count} shown • {VisibleSelectedCount} visible selected • {SelectedCount} total selected";
+    public bool SelectedPackageIsCurrent => IsCurrentPackage(SelectedPackage);
+    public bool CanVerifySelectedPackage => SelectedPackageIsCurrent && SelectedPackage?.HasExactIdentity == true;
     public bool CanUpdate => !IsBusy && SelectedCount > 0;
     public bool HasPackages => Packages.Count > 0;
     public bool HasSourceIssues => SourceOptions.Any(o => o.HasIssue);
     public int SourceIssueCount => SourceOptions.Count(o => o.HasIssue);
     public bool ShowIssueBanner => ScanSummary is ScanSummaryKind.CompletedWithIssues
-        or ScanSummaryKind.AllUnavailable or ScanSummaryKind.Cancelled;
+        or ScanSummaryKind.AllUnavailable or ScanSummaryKind.Cancelled or ScanSummaryKind.NeedsScan;
     public bool ShowSourceProgress => Operation is AppOperationKind.Scanning or AppOperationKind.Cancelling
         && SourceOptions.Any(o => o.State.Status is SourceScanStatus.Probing or SourceScanStatus.Scanning or SourceScanStatus.Waiting);
     public bool HasCacheCleanupStatus => !string.IsNullOrWhiteSpace(CacheCleanupStatus);
@@ -114,6 +126,7 @@ public partial class MainViewModel : ObservableObject
         : ScanSummary switch
         {
             ScanSummaryKind.NotStarted => "Ready. Scan enabled sources for updates.",
+            ScanSummaryKind.NeedsScan => "Source configuration changed. Scan again to refresh results.",
             ScanSummaryKind.Running => $"Scanning sources ({OperationCompleted}/{OperationTotal})…",
             ScanSummaryKind.UpdatesAvailable => $"{UpdateCount} update{(UpdateCount == 1 ? "" : "s")} available.",
             ScanSummaryKind.UpdatesCompleted => UpdateSummary is null ? "Updates completed." :
@@ -129,6 +142,7 @@ public partial class MainViewModel : ObservableObject
     public string EmptyTitle => ScanSummary switch
     {
         ScanSummaryKind.NotStarted => "Ready to Scan",
+        ScanSummaryKind.NeedsScan => "Scan Required",
         ScanSummaryKind.Running => "Scanning Sources",
         ScanSummaryKind.UpdatesCompleted => "Updates Completed",
         ScanSummaryKind.UpToDate => "Selected Sources Are Up to Date",
@@ -142,6 +156,7 @@ public partial class MainViewModel : ObservableObject
     public string EmptyDescription => ScanSummary switch
     {
         ScanSummaryKind.NotStarted => "Check your enabled package managers for available updates.",
+        ScanSummaryKind.NeedsScan => "Scan your enabled package managers to refresh results.",
         ScanSummaryKind.Running => "Updates appear as each source completes.",
         ScanSummaryKind.UpdatesCompleted => "The selected packages were updated and verified.",
         ScanSummaryKind.UpToDate => "Every enabled source completed successfully.",
@@ -173,7 +188,7 @@ public partial class MainViewModel : ObservableObject
     private void RetryIssues()
     {
         if (IsBusy) return;
-        var ids = SourceOptions.Where(o => o.HasIssue).Select(o => o.Id).ToHashSet();
+        var ids = SourceOptions.Where(o => o.IsEnabled && (o.HasIssue || o.State.Status == SourceScanStatus.NotScanned)).Select(o => o.Id).ToHashSet();
         if (ids.Count > 0) StartOperation(ct => RunScanAsync(ids, false, ct));
     }
 
@@ -192,8 +207,40 @@ public partial class MainViewModel : ObservableObject
         if (!IsBusy && package?.IsActionable == true) StartUpdates([(package, true)]);
     }
 
-    [RelayCommand] private void SelectAll() { foreach (var package in Packages.Where(p => p.IsActionable)) package.IsSelected = true; RefreshComputed(); }
-    [RelayCommand] private void SelectNone() { foreach (var package in Packages) package.IsSelected = false; RefreshComputed(); }
+    [RelayCommand] private void SelectAll() => SetSelection(Packages, true);
+    [RelayCommand] private void SelectNone() => SetSelection(Packages, false);
+    [RelayCommand] private void SelectVisible() => SetSelection(PackagesView.Cast<PackageUpdate>(), true);
+    [RelayCommand] private void DeselectVisible() => SetSelection(PackagesView.Cast<PackageUpdate>(), false);
+
+    private void SetSelection(IEnumerable<PackageUpdate> packages, bool selected)
+    {
+        if (IsBusy) return;
+        _batchSelection = true;
+        try { foreach (var package in packages.ToList()) package.IsSelected = selected && package.IsActionable; }
+        finally { _batchSelection = false; RefreshComputed(); }
+    }
+
+    private bool MatchesSearch(PackageUpdate package)
+    {
+        return _searchTerms.All(term => package.Name.Contains(term, StringComparison.OrdinalIgnoreCase)
+            || package.PackageId.Contains(term, StringComparison.OrdinalIgnoreCase)
+            || package.Source.Contains(term, StringComparison.OrdinalIgnoreCase)
+            || package.RepositoryText.Contains(term, StringComparison.OrdinalIgnoreCase)
+            || package.StatusTitle.Contains(term, StringComparison.OrdinalIgnoreCase));
+    }
+
+    partial void OnSearchTextChanged(string value)
+    {
+        _searchTerms = (value ?? "").Split(' ', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        PackagesView.Refresh();
+        RefreshComputed();
+    }
+
+    partial void OnSelectedPackageChanged(PackageUpdate? value)
+    {
+        OnPropertyChanged(nameof(SelectedPackageIsCurrent));
+        OnPropertyChanged(nameof(CanVerifySelectedPackage));
+    }
     [RelayCommand] private void ToggleLog() => IsLogVisible = !IsLogVisible;
     [RelayCommand] private void ClearLog() => LogEntries.Clear();
     [RelayCommand]
@@ -211,11 +258,17 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private void RemoveIgnored(string? key)
     {
-        if (string.IsNullOrWhiteSpace(key)) return;
+        if (string.IsNullOrWhiteSpace(key) || IsBusy) return;
         try
         {
             _settings.SetUpdateIgnored(key, false);
             IgnoredUpdates.Remove(key);
+            if (IgnoreRuleKey.TryGetSource(key, out var source))
+            {
+                var option = SourceOptions.FirstOrDefault(o => o.Id == source);
+                if (option?.IsEnabled == true) InvalidateSource(option);
+            }
+            DeriveScanSummary(log: false);
             OnPropertyChanged(nameof(HasIgnoredUpdates));
         }
         catch (Exception ex) { AppendLog($"Could not update ignore rules: {ex.Message}", LogLevel.Error); }
@@ -223,16 +276,16 @@ public partial class MainViewModel : ObservableObject
 
     private void Ignore(PackageUpdate? package, bool versioned)
     {
-        if (package is null || IsBusy) return;
-        var key = versioned
-            ? $"{package.SourceId}:{package.PackageId}@{package.AvailableVersion}"
-            : $"{package.SourceId}:{package.PackageId}";
+        if (package is null || IsBusy || !IsCurrentPackage(package)) return;
+        var key = IgnoreRuleKey.Create(package.SourceId, package.Repository, package.PackageId,
+            versioned ? package.AvailableVersion : null);
         try
         {
             _settings.SetUpdateIgnored(key, true);
             IgnoredUpdates.Add(key);
             package.PropertyChanged -= OnPackageChanged;
             Packages.Remove(package);
+            if (ReferenceEquals(SelectedPackage, package)) SelectedPackage = null;
             PackagesView.Refresh();
             _ignoredBySource[package.SourceId] = _ignoredBySource.GetValueOrDefault(package.SourceId) + 1;
             DeriveScanSummary();
@@ -282,10 +335,9 @@ public partial class MainViewModel : ObservableObject
                 related.ExecutableOverride = path;
                 related.ToolContext = null;
                 related.ProbeIssue = null;
-                related.State.Set(related.IsEnabled ? SourceScanStatus.NotScanned : SourceScanStatus.Disabled);
-                RemovePackages(related.Id);
-                related.Refresh();
+                InvalidateSource(related);
             }
+            DeriveScanSummary(log: false);
         }
         catch (Exception ex) { AppendLog($"Could not save executable setting: {ex.Message}", LogLevel.Error); }
         RefreshComputed();
@@ -304,7 +356,8 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private async Task InstallSource(SourceOptionViewModel? option)
     {
-        if (option is null || IsBusy) return;
+        if (option is null || IsBusy || !option.IsEnabled || option.State.Status != SourceScanStatus.Unavailable) return;
+        if ((option.ProbeIssue ?? option.State.Issues.FirstOrDefault()) is { CanInstall: false }) return;
         SourceInstallPlan? plan;
         try { plan = await _installer.BuildPlanAsync(option.Id); }
         catch (Exception ex)
@@ -320,12 +373,13 @@ public partial class MainViewModel : ObservableObject
             ShowInstallNotice(message);
             return;
         }
+        if (IsBusy || !option.IsEnabled || option.State.Status != SourceScanStatus.Unavailable) return;
         var confirmation = $"{plan.Summary}\n\n" +
             (plan.RequiresElevation
                 ? "Windows will ask for administrator approval."
                 : "No administrator rights are needed.") +
             $"\n\nInstall {plan.Title}?";
-        if (!ConfirmInstall(confirmation)) return;
+        if (!ConfirmInstall(confirmation) || IsBusy || !option.IsEnabled || option.State.Status != SourceScanStatus.Unavailable) return;
         StartOperation(ct => RunInstallAsync(option, plan, ct));
     }
 
@@ -350,14 +404,23 @@ public partial class MainViewModel : ObservableObject
                 TrySetCachedContext(option.Id, existing.Context);
                 AppendLog($"{option.Name} is already installed; nothing to do.", LogLevel.Info, option.Name);
             }
+            else if (existing.Issue?.CanInstall != true)
+            {
+                option.ProbeIssue = existing.Issue;
+                option.State.Set(SourceScanStatus.Unavailable, issues: existing.Issue is null ? [] : [existing.Issue]);
+                option.Refresh();
+                AppendLog($"{option.Name} cannot be installed until its configuration is corrected.", LogLevel.Warning, option.Name);
+                return;
+            }
             else
             {
-                var progress = new Progress<ProcessOutputEvent>(output =>
+                using var progress = new BufferedProgress<ProcessOutputEvent>(output =>
                 {
                     var line = output.Line.Trim();
                     if (line.Length > 0) AppendLog(line, LogLevel.Output, option.Name, output.Stream);
                 });
                 await _installer.InstallAsync(plan, progress, cancellationToken);
+                progress.Flush();
                 AppendLog($"{plan.Title} installer finished; verifying the installation…", LogLevel.Success, option.Name);
                 TrySetCachedContext(option.Id, null);
                 option.ToolContext = null;
@@ -486,12 +549,13 @@ public partial class MainViewModel : ObservableObject
                     option.Refresh();
                 }
 
-                var progress = new Progress<ProcessOutputEvent>(output =>
+                using var progress = new BufferedProgress<ProcessOutputEvent>(output =>
                 {
                     var line = output.Line.Trim();
                     if (line.Length > 0) AppendLog(line, LogLevel.Output, source.Name, output.Stream);
                 });
                 var result = await source.ClearCacheAsync(context, progress, cancellationToken);
+                progress.Flush();
                 cacheItem.ResultText = result;
                 cacheItem.PreviewText = "Cache changed; preview again for a fresh estimate.";
                 cleared++;
@@ -554,9 +618,10 @@ public partial class MainViewModel : ObservableObject
                 AvailableUpdate = update;
                 AppendLog($"PackMan {update.Version} is available; use the banner to install it.", LogLevel.Success);
             }
-            else if (force)
+            else
             {
-                AppendLog("PackMan is up to date.");
+                AvailableUpdate = null;
+                if (force) AppendLog("PackMan is up to date.");
             }
         }
         catch (Exception ex)
@@ -625,6 +690,12 @@ public partial class MainViewModel : ObservableObject
         bool interactive = false, bool verifyOnly = false)
     {
         if (IsBusy || packages.Count == 0) return;
+        if (packages.Any(item => !IsCurrentPackage(item.Package)
+            || (!verifyOnly && !item.Package.IsActionable) || (verifyOnly && !item.Package.HasExactIdentity)))
+        {
+            AppendLog("The selected package results are no longer current. Scan again before updating.", LogLevel.Warning);
+            return;
+        }
         StartOperation(ct => RunUpdatesAsync(packages, ct, interactive, verifyOnly));
     }
 
@@ -676,7 +747,9 @@ public partial class MainViewModel : ObservableObject
         {
             _detectedBySource.Clear();
             _ignoredBySource.Clear();
+            foreach (var package in Packages) package.PropertyChanged -= OnPackageChanged;
             Packages.Clear();
+            SelectedPackage = null;
             foreach (var option in SourceOptions)
             {
                 option.State.Set(option.IsEnabled ? SourceScanStatus.Waiting : SourceScanStatus.Disabled);
@@ -687,7 +760,7 @@ public partial class MainViewModel : ObservableObject
         }
         else
         {
-            foreach (var option in options) { option.State.Set(SourceScanStatus.Waiting); option.Refresh(); }
+            foreach (var option in options) { RemovePackages(option.Id); option.State.Set(SourceScanStatus.Waiting); option.Refresh(); }
         }
         AppendLog(fresh ? $"Scan started ({string.Join(", ", options.Select(o => o.Name))})."
             : $"Retrying sources with issues ({string.Join(", ", options.Select(o => o.Name))}).");
@@ -717,8 +790,12 @@ public partial class MainViewModel : ObservableObject
     private async Task<SourceOutcome> ScanOneAsync(SourceOptionViewModel option, CancellationToken cancellationToken)
     {
         option.State.Set(SourceScanStatus.Probing, SourcePhase.Probing); option.Refresh();
-        var progress = new Progress<SourcePhase>(phase => { option.State.Set(SourceScanStatus.Scanning, phase); option.Refresh(); });
-        var cached = option.ToolContext ?? _settings.GetCachedContext(option.Id);
+        var progress = new Progress<SourcePhase>(phase =>
+        {
+            if (option.State.Status is SourceScanStatus.Probing or SourceScanStatus.Scanning)
+            { option.State.Set(SourceScanStatus.Scanning, phase); option.Refresh(); }
+        });
+        var cached = _settings.GetCachedContext(option.Id);
         if (cached is not null)
         {
             option.ToolContext = cached;
@@ -729,10 +806,15 @@ public partial class MainViewModel : ObservableObject
                 return new(option, OutcomeKind.Report, await option.Source.ScanAsync(cached, progress, cancellationToken));
             }
             catch (OperationCanceledException) { return new(option, OutcomeKind.Cancelled); }
-            catch
+            catch (Exception ex) when (ex is SourceException { Kind: SourceIssueKind.Configuration or SourceIssueKind.ToolStart })
             {
                 TrySetCachedContext(option.Id, null);
                 option.ToolContext = null;
+            }
+            catch (Exception ex)
+            {
+                var kind = ex is SourceException source ? source.Kind : SourceIssueKind.Command;
+                return new(option, OutcomeKind.Failed, Issue: new(kind, ex.Message, "Open the log for details and retry."));
             }
         }
         try
@@ -794,16 +876,17 @@ public partial class MainViewModel : ObservableObject
         option.Refresh();
     }
 
-    private void DeriveScanSummary()
+    private void DeriveScanSummary(bool log = true)
     {
         var enabled = SourceOptions.Where(o => o.IsEnabled).ToList();
         if (enabled.Count == 0) ScanSummary = ScanSummaryKind.NoSources;
         else if (enabled.All(o => o.State.Status == SourceScanStatus.Unavailable)) ScanSummary = ScanSummaryKind.AllUnavailable;
         else if (enabled.Any(o => o.State.HasIssue)) ScanSummary = ScanSummaryKind.CompletedWithIssues;
+        else if (enabled.Any(o => o.State.Status != SourceScanStatus.Succeeded)) ScanSummary = ScanSummaryKind.NeedsScan;
         else if (Packages.Any(p => !p.IsActionable)) ScanSummary = ScanSummaryKind.CompletedWithIssues;
         else ScanSummary = UpdateCount > 0 ? ScanSummaryKind.UpdatesAvailable
             : IgnoredCount > 0 ? ScanSummaryKind.IgnoredOnly : ScanSummaryKind.UpToDate;
-        AppendLog($"Scan complete. {UpdateCount} update(s) found.", HasSourceIssues ? LogLevel.Warning : LogLevel.Info);
+        if (log) AppendLog($"Scan complete. {UpdateCount} update(s) found.", HasSourceIssues ? LogLevel.Warning : LogLevel.Info);
         RefreshComputed();
     }
 
@@ -822,7 +905,7 @@ public partial class MainViewModel : ObservableObject
             Guid.NewGuid(), runId, DateTimeOffset.Now, null, i.Package.SourceId, i.Package.PackageId,
             i.Package.Name, i.Package.Repository, i.Package.CurrentVersion, i.Package.AvailableVersion,
             null, HistoryOutcome.NotStarted, i.Package.Restart, null, null, i.Package.ToolPath, ""));
-        foreach (var entry in history.Values) SaveHistory(entry);
+        await SaveHistoryAsync(history.Values);
         var attempted = new HashSet<string>();
         var succeeded = new HashSet<string>();
         var verificationOnly = new HashSet<string>();
@@ -836,7 +919,7 @@ public partial class MainViewModel : ObservableObject
                 var package = item.Package;
                 if (cancellationToken.IsCancellationRequested) break;
                 attempted.Add(package.Id);
-                SaveHistory(history[package.Id] with { Outcome = HistoryOutcome.Running });
+                await SaveHistoryAsync(history[package.Id] with { Outcome = HistoryOutcome.Running });
                 CurrentItem = package.Name;
                 var request = package.ToRequest(item.Elevated, interactive);
                 if (verifyOnly || package.NeedsVerificationOnly)
@@ -847,6 +930,8 @@ public partial class MainViewModel : ObservableObject
                     continue;
                 }
                 package.Status = UpdateStatus.Updating;
+                package.Restart = RestartState.None;
+                package.VerificationEvidence = null;
                 package.StatusMessage = null;
                 package.CommandOutput = string.Empty;
                 _lastOutput.Remove($"{package.Id}|{ProcessOutputStream.StandardOutput}");
@@ -854,12 +939,14 @@ public partial class MainViewModel : ObservableObject
                 package.Restart = RestartState.None;
                 package.VerificationEvidence = null;
                 package.CanRetryElevated = false;
-                var progress = new Progress<ProcessOutputEvent>(output => AppendOutput(package, output));
+                using var progress = new BufferedProgress<ProcessOutputEvent>(output => AppendOutput(package, output));
                 try
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var installResult = await UpdateWithElevationRetryAsync(package, request, progress, cancellationToken);
+                    progress.Flush();
                     package.Restart = installResult.Restart;
-                    SaveHistory(history[package.Id] with { Outcome = HistoryOutcome.Running, Restart = package.Restart,
+                    await SaveHistoryAsync(history[package.Id] with { Outcome = HistoryOutcome.Running, Restart = package.Restart,
                         Message = "Installation command completed; awaiting verification.", Output = package.CommandOutput });
                     package.Status = UpdateStatus.Verifying;
                     items.Add((package, request));
@@ -973,6 +1060,7 @@ public partial class MainViewModel : ObservableObject
                 AppendLog($"Verification failed — {outcome.Error.Message}", LogLevel.Error,
                     outcome.Batch.Items[0].Package.Source);
         }
+        var finishedHistory = new List<UpdateHistoryEntry>();
         foreach (var (package, _) in selected)
         {
             var didStart = attempted.Contains(package.Id);
@@ -980,14 +1068,16 @@ public partial class MainViewModel : ObservableObject
                 : !didStart ? HistoryOutcome.NotStarted
                 : package.Status == UpdateStatus.Cancelled ? HistoryOutcome.Cancelled
                 : package.NeedsVerificationOnly ? HistoryOutcome.Unverified : HistoryOutcome.Failed;
-            SaveHistory(history[package.Id] with { FinishedAt = DateTimeOffset.Now, Outcome = result,
+            finishedHistory.Add(history[package.Id] with { FinishedAt = DateTimeOffset.Now, Outcome = result,
                 InstalledVersion = installedVersions.GetValueOrDefault(package.Id), Restart = package.Restart,
                 Evidence = package.VerificationEvidence, Message = package.StatusMessage, Output = package.CommandOutput });
         }
+        await SaveHistoryAsync(finishedHistory);
         var verified = verificationOnly.Count(succeeded.Contains);
         UpdateSummary = new(updated - verified, failed, cancelled, verificationFailed, selected.Count - attempted.Count,
             selected.Count(i => i.Package.Restart != RestartState.None), verified);
         ScanSummary = HasSourceIssues ? ScanSummaryKind.CompletedWithIssues
+            : SourceOptions.Any(o => o.IsEnabled && o.State.Status != SourceScanStatus.Succeeded) ? ScanSummaryKind.NeedsScan
             : UpdateCount == 0 ? ScanSummaryKind.UpdatesCompleted : ScanSummaryKind.UpdatesAvailable;
         AppendLog(cancellationToken.IsCancellationRequested ? "Update run cancelled." : "Update run finished.",
             failed + verificationFailed + cancelled > 0 ? LogLevel.Warning : LogLevel.Success);
@@ -1043,6 +1133,7 @@ public partial class MainViewModel : ObservableObject
                 HasExactIdentity = info.HasExactIdentity,
                 RequiresUnknownVersionConsent = info.RequiresUnknownVersionConsent,
                 AllowUnknownVersion = IncludeUnknownVersions,
+                IsSelected = info.HasExactIdentity && (!info.RequiresUnknownVersionConsent || IncludeUnknownVersions),
             };
             package.PropertyChanged += OnPackageChanged;
             Packages.Add(package);
@@ -1060,30 +1151,53 @@ public partial class MainViewModel : ObservableObject
             package.PropertyChanged -= OnPackageChanged;
             Packages.Remove(package);
         }
+        if (SelectedPackage?.SourceId == sourceId) SelectedPackage = null;
     }
 
     private static bool IsIgnored(IReadOnlySet<string> ignored, SourceId sourceId, PackageInfo info) =>
-        ignored.Contains($"{sourceId}:{info.Id}")
-        || ignored.Contains($"{sourceId}:{info.Id}@{info.AvailableVersion}");
+        IgnoreRuleKey.IsIgnored(ignored, sourceId, info);
+
+    private bool IsCurrentPackage(PackageUpdate? package) => package is not null && Packages.Contains(package)
+        && SourceOptions.Any(option => option.Id == package.SourceId && option.IsEnabled
+            && ContextMatches(option.ToolContext, package.ToolContext)
+            && option.State.Status is SourceScanStatus.Succeeded or SourceScanStatus.Partial);
+
+    private void InvalidateSource(SourceOptionViewModel option)
+    {
+        RemovePackages(option.Id);
+        option.State.Set(option.IsEnabled ? SourceScanStatus.NotScanned : SourceScanStatus.Disabled);
+        option.Refresh();
+    }
+
+    private static bool ContextMatches(ToolContext? left, ToolContext? right) =>
+        left is not null && right is not null
+        && string.Equals(left.ExecutablePath, right.ExecutablePath, StringComparison.OrdinalIgnoreCase)
+        && left.Version == right.Version
+        && left.PathEntries.SequenceEqual(right.PathEntries, StringComparer.OrdinalIgnoreCase)
+        && (left.PrefixArguments ?? []).SequenceEqual(right.PrefixArguments ?? [], StringComparer.Ordinal);
 
     private void OnPackageChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName is nameof(PackageUpdate.IsSelected) or nameof(PackageUpdate.Status)) RefreshComputed();
         if (e.PropertyName is nameof(PackageUpdate.Name) or nameof(PackageUpdate.Source)
             or nameof(PackageUpdate.CurrentVersion) or nameof(PackageUpdate.AvailableVersion)
-            or nameof(PackageUpdate.StatusTitle)) PackagesView.Refresh();
+            or nameof(PackageUpdate.StatusTitle)) { PackagesView.Refresh(); RefreshComputed(); }
+        if (!_batchSelection && e.PropertyName is (nameof(PackageUpdate.IsSelected) or nameof(PackageUpdate.Status))) RefreshComputed();
     }
 
     private void OnSourceOptionChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName != nameof(SourceOptionViewModel.IsEnabled) || sender is not SourceOptionViewModel option) return;
-        if (IsBusy) { option.IsEnabled = !option.IsEnabled; return; }
+        if (_revertingSourceChange || e.PropertyName != nameof(SourceOptionViewModel.IsEnabled) || sender is not SourceOptionViewModel option) return;
+        if (IsBusy)
+        {
+            _revertingSourceChange = true;
+            try { option.IsEnabled = !option.IsEnabled; } finally { _revertingSourceChange = false; }
+            return;
+        }
         try
         {
             _settings.SetSourceEnabled(option.Id, option.IsEnabled);
-            if (!option.IsEnabled) RemovePackages(option.Id);
-            option.State.Set(option.IsEnabled ? SourceScanStatus.NotScanned : SourceScanStatus.Disabled);
-            option.Refresh();
+            InvalidateSource(option);
+            DeriveScanSummary(log: false);
         }
         catch (Exception ex) { AppendLog($"Could not save source setting: {ex.Message}", LogLevel.Error); }
         RefreshComputed();
@@ -1094,7 +1208,7 @@ public partial class MainViewModel : ObservableObject
         var line = output.Line.Trim();
         if (line.Length == 0) return;
         var key = $"{package.Id}|{output.Stream}";
-        if (_lastOutput.GetValueOrDefault(key) == line) return;
+        if (output.Stream == ProcessOutputStream.StandardOutput && _lastOutput.GetValueOrDefault(key) == line) return;
         _lastOutput[key] = line;
         package.CommandOutput += (output.Stream == ProcessOutputStream.StandardError ? "[stderr] " : "")
             + line + Environment.NewLine;
@@ -1120,6 +1234,11 @@ public partial class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(SelectedCount));
         OnPropertyChanged(nameof(CanUpdate));
         OnPropertyChanged(nameof(HasPackages));
+        OnPropertyChanged(nameof(HasVisiblePackages));
+        OnPropertyChanged(nameof(HasNoSearchMatches));
+        OnPropertyChanged(nameof(SearchSummary));
+        OnPropertyChanged(nameof(SelectedPackageIsCurrent));
+        OnPropertyChanged(nameof(CanVerifySelectedPackage));
         OnPropertyChanged(nameof(HasSourceIssues));
         OnPropertyChanged(nameof(SourceIssueCount));
         OnPropertyChanged(nameof(ShowIssueBanner));

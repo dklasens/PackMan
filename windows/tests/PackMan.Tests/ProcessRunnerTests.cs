@@ -21,6 +21,21 @@ public sealed class ProcessRunnerTests
     }
 
     [Fact]
+    public async Task DiagnosticCaptureCanBeBoundedWithoutLosingLiveEvents()
+    {
+        var events = new ConcurrentQueue<ProcessOutputEvent>();
+        var runner = new ProcessRunner(new StubElevationBroker());
+        var result = await runner.RunAsync(new ProcessInvocation("cmd.exe",
+            ["/d", "/s", "/c", "echo first message & echo second message & echo last"], MaxCapturedOutputChars: 12),
+            new SynchronousProgress<ProcessOutputEvent>(events.Enqueue));
+        Assert.True(result.Success);
+        Assert.True(result.StdOut.Length <= 12);
+        Assert.Contains("last", result.StdOut);
+        Assert.Contains(events, e => e.Line.Contains("first message"));
+        Assert.Contains(events, e => e.Line.Contains("second message"));
+    }
+
+    [Fact]
     public async Task CmdScriptWithSpaceInPathRunsThroughCmd()
     {
         var directory = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(),

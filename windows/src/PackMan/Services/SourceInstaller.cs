@@ -74,7 +74,7 @@ public sealed class SourceInstaller(IToolResolver resolver, IProcessRunner runne
     {
         foreach (var step in plan.Steps)
         {
-            var result = await runner.RunAsync(step, output, cancellationToken);
+            var result = await runner.RunAsync(step with { MaxCapturedOutputChars = ProcessRunner.DiagnosticCaptureLimit }, output, cancellationToken);
             if (!result.Success) throw SourceSupport.CommandFailure($"{plan.Title} installer", result);
         }
     }

@@ -315,7 +315,7 @@ public sealed class SourceParsingTests
             {"status":"partial","data":{"packages":[{"package":"ruff","version":"0.9","latest_version":"0.11","injected":false,"pinned":false}]},
              "errors":[{"message":"index unavailable","environment":"black"}]}
             """, ""));
-        var source = new PipxSource(new StubResolver(), runner, new HttpClient(new NeverCalledHandler()));
+        var source = new PipxSource(new StubResolver(), runner);
         var report = await source.ScanAsync(new ToolContext("pipx.exe", "1.16", ToolResolutionOrigin.Custom, []));
         Assert.Equal("ruff", Assert.Single(report.Updates).Id);
         Assert.Single(report.Issues);
@@ -467,6 +467,7 @@ public sealed class SourceParsingTests
                               "-----------------------------------\n" +
                               "newer-local     9.0.0      newer\n" +
                               "old-tool        1.0.0      old\n", ""));
+        runner.Enqueue(new(0, "E https://api.nuget.org/v3/index.json", ""));
         runner.Enqueue(new(0, "updated", ""));
         var source = new DotnetSource(new StubResolver(), runner,
             StubHttpHandler.JsonClient("{\"versions\":[\"1.0.0\",\"1.1.0\",\"2.0.0-preview.1\"]}"));
@@ -487,9 +488,9 @@ public sealed class SourceParsingTests
     {
         var runner = new StubRunner();
         runner.Enqueue(new(0, "--outdated --output", ""));
-        runner.Enqueue(new(0, "", ""));
-        runner.Enqueue(new(0, "", ""));
-        var source = new PipxSource(new StubResolver(), runner, new HttpClient(new NeverCalledHandler()));
+        runner.Enqueue(new(0, """{"data":{"packages":[]},"errors":[]}""", ""));
+        runner.Enqueue(new(0, """{"data":{"packages":[]},"errors":[]}""", ""));
+        var source = new PipxSource(new StubResolver(), runner);
         var context = new ToolContext("pipx.exe", "1.16", ToolResolutionOrigin.Custom, []);
         await source.ScanAsync(context);
         await source.ScanAsync(context);
@@ -535,7 +536,7 @@ public sealed class SourceParsingTests
         runner.Enqueue(new(0, "black 25.1.0, installed using Python 3.13\nruff 0.12.0, installed using Python 3.13\n", ""));
         runner.Enqueue(new(0, "Files removed: 4", ""));
         runner.Enqueue(new(0, "Files removed: 0", ""));
-        var source = new PipxSource(new StubResolver(), runner, new HttpClient(new NeverCalledHandler()));
+        var source = new PipxSource(new StubResolver(), runner);
 
         var message = await source.ClearCacheAsync(
             new ToolContext("pipx.exe", "1.8", ToolResolutionOrigin.Custom, []));

@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.9.2 — 2026-11-26
+
+### Windows
+
+- Reject stale package actions and invalidate scan results when source configuration changes.
+- Distinguish unsuccessful and malformed scans from recognised clean results; scope new ignores to repository identity.
+- Separate missing package managers from tools with configuration problems.
+- Add search, visible/total selection counts, and visible-only selection commands.
+- Batch atomic history writes, preserve recovery checkpoints, and reduce log and selection overhead.
+- Expire cached tools and refresh capabilities following executable/version changes; improve package version comparison and configured-feed checks.
+- Discover Windows-compatible GitHub releases independently of the Mac release stream.
+
+macOS remains at v1.10. WSL2 is not included in this release.
+
+[Release notes and downloads](https://github.com/dklasens/PackMan/releases/tag/v1.9.2)
+
 ## 1.10 — 2026-10-28
 
 ### macOS

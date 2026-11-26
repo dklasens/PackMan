@@ -33,12 +33,21 @@ public partial class SourceState : ObservableObject
     public void Set(SourceScanStatus status, SourcePhase phase = SourcePhase.Probing,
         int updateCount = 0, IReadOnlyList<SourceIssue>? issues = null)
     {
+        var wasActive = Status is SourceScanStatus.Probing or SourceScanStatus.Scanning or SourceScanStatus.Installing;
         Status = status;
         Phase = phase;
         UpdateCount = updateCount;
         Issues = issues ?? [];
-        if (status is SourceScanStatus.Probing or SourceScanStatus.Scanning or SourceScanStatus.Installing)
-            StartedAt ??= DateTimeOffset.Now;
+        if (status is SourceScanStatus.Waiting or SourceScanStatus.NotScanned or SourceScanStatus.Disabled)
+        {
+            StartedAt = null;
+            CompletedAt = null;
+        }
+        if (status is SourceScanStatus.Probing or SourceScanStatus.Scanning or SourceScanStatus.Installing && !wasActive)
+        {
+            StartedAt = DateTimeOffset.Now;
+            CompletedAt = null;
+        }
         if (status is SourceScanStatus.Succeeded or SourceScanStatus.Partial or SourceScanStatus.Unavailable
             or SourceScanStatus.Failed or SourceScanStatus.Cancelled)
             CompletedAt = DateTimeOffset.Now;
@@ -50,6 +59,7 @@ public enum AppOperationKind { Idle, Scanning, Updating, Installing, CleaningCac
 public enum ScanSummaryKind
 {
     NotStarted,
+    NeedsScan,
     Running,
     UpdatesAvailable,
     UpdatesCompleted,

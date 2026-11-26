@@ -48,21 +48,30 @@ public sealed class NpmSource(IToolResolver resolver, IProcessRunner runner) : P
                 return SourceScanReport.Empty;
             throw SourceSupport.CommandFailure("npm outdated", result);
         }
-        if (string.IsNullOrWhiteSpace(result.StdOut)) return SourceScanReport.Empty;
+        if (string.IsNullOrWhiteSpace(result.StdOut))
+        {
+            if (result.Success && string.IsNullOrWhiteSpace(result.StdErr)) return SourceScanReport.Empty;
+            throw SourceSupport.CommandFailure("npm outdated", result);
+        }
         Dictionary<string, NpmEntry> entries;
-        try { entries = JsonSerializer.Deserialize<Dictionary<string, NpmEntry>>(result.StdOut) ?? []; }
+        try { entries = JsonSerializer.Deserialize<Dictionary<string, NpmEntry>>(result.StdOut)
+            ?? throw new JsonException("Expected a package object."); }
         catch (JsonException ex) { throw new SourceException(SourceIssueKind.Parsing, $"npm JSON could not be parsed: {ex.Message}"); }
         var updates = new List<PackageInfo>();
         var issues = new List<SourceIssue>();
+        if ((result.ExitCode == 1 && entries.Count == 0) || result.StdErr.Contains("npm error", StringComparison.OrdinalIgnoreCase)
+            || result.StdErr.Contains("npm ERR!", StringComparison.OrdinalIgnoreCase))
+            issues.Add(new(SourceIssueKind.Command, "npm did not complete its outdated check.", SourceSupport.ErrorText(result)));
         foreach (var (id, entry) in entries)
         {
             if (!PackageIdValidator.IsValid(id)) { issues.Add(new(SourceIssueKind.Parsing, "npm returned an invalid package identifier.")); continue; }
-            if (string.IsNullOrWhiteSpace(entry.Latest)) { issues.Add(new(SourceIssueKind.Parsing, $"{id}: npm did not return a latest version.")); continue; }
+            if (entry is null || !PackageIdValidator.IsValidVersion(entry.Current) || !PackageIdValidator.IsValidVersion(entry.Latest))
+            { issues.Add(new(SourceIssueKind.Parsing, $"{id}: npm did not return valid installed and latest versions.")); continue; }
             // npm reports the "latest" dist-tag even when it trails what is installed, which is
             // routine for a package tracking a prerelease channel. Installing that version would
             // be a downgrade, so only offer versions that provably move forward.
             if (!SemanticVersion.IsUpgrade(entry.Current, entry.Latest)) continue;
-            updates.Add(new(id, id, entry.Current ?? string.Empty, entry.Latest));
+            updates.Add(new(id, id, entry.Current!, entry.Latest!));
         }
         return new(updates, issues);
     }

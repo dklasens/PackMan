@@ -28,7 +28,13 @@ public partial class MainViewModel
                     var option = SourceOptions.First(o => o.Id == item.Id);
                     var probe = await item.Source.ProbeAsync(ct);
                     if (!probe.IsAvailable) { item.PreviewText = "Unavailable: " + probe.Issue?.Message; continue; }
+                    if (option.ToolContext is not null && !ContextMatches(option.ToolContext, probe.Context))
+                    {
+                        InvalidateSource(option);
+                        DeriveScanSummary(log: false);
+                    }
                     option.ToolContext = probe.Context;
+                    TrySetCachedContext(option.Id, probe.Context);
                     option.Refresh();
                     if (_cacheInspector is null) { item.PreviewText = "Cache size cannot be measured."; continue; }
                     var preview = await _cacheInspector.PreviewAsync(item.Source, probe.Context!, ct);

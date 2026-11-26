@@ -31,14 +31,20 @@ public sealed class ChocoSource : PackageSourceBase
         foreach (var line in result.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
             var parts = line.Split('|');
-            if (parts.Length < 4 || !PackageIdValidator.IsValid(parts[0]))
+            if (parts.Length < 4 || !PackageIdValidator.IsValid(parts[0])
+                || !PackageIdValidator.IsValidVersion(parts[1]) || !PackageIdValidator.IsValidVersion(parts[2])
+                || !bool.TryParse(parts[3], out _))
             {
-                if (line.Contains('|')) issues.Add(new(SourceIssueKind.Parsing, "Chocolatey returned an invalid package record."));
+                issues.Add(new(SourceIssueKind.Parsing, "Chocolatey returned an unrecognized package record."));
                 continue;
             }
             if (string.Equals(parts[3], "true", StringComparison.OrdinalIgnoreCase)) continue;
             updates.Add(new(parts[0], parts[0], parts[1], parts[2]));
         }
+        if (!string.IsNullOrWhiteSpace(result.StdErr))
+            issues.Add(new(SourceIssueKind.Command, "Chocolatey returned diagnostics during the outdated check.", SourceSupport.ErrorText(result)));
+        if (result.ExitCode == 2 && string.IsNullOrWhiteSpace(result.StdOut))
+            issues.Add(new(SourceIssueKind.Parsing, "Chocolatey reported outdated packages but returned no package records."));
         return new(updates, issues.DistinctBy(i => i.Id).ToList());
     }
 
@@ -60,7 +66,7 @@ public sealed class ChocoSource : PackageSourceBase
                 throw new SourceException(SourceIssueKind.Verification, "Chocolatey's installed inventory contained an unrecognized record.");
             installed[parts[0]] = parts[1];
         }
-        return requests.ToDictionary(r => r.Identity, r => VerifyInstalled(installed.GetValueOrDefault(r.PackageId), r),
+        return requests.ToDictionary(r => r.Identity, r => VerifyInstalled(installed.GetValueOrDefault(r.PackageId), r, PackageVersions.CompareNuGet),
             StringComparer.OrdinalIgnoreCase);
     }
 
@@ -175,7 +181,8 @@ public sealed class ChocoSource : PackageSourceBase
         Validate(request);
         var result = await Runner.RunAsync(new ProcessInvocation(context.ExecutablePath,
             Arguments(context, "upgrade", request.PackageId, "--version", request.TargetVersion, "-y", "--no-progress"),
-            context.Environment, TimeSpan.FromMinutes(15), Elevated: true), output, cancellationToken);
+            context.Environment, TimeSpan.FromMinutes(15), Elevated: true,
+            MaxCapturedOutputChars: ProcessRunner.DiagnosticCaptureLimit), output, cancellationToken);
         return result.ExitCode switch
         {
             0 or 2 => new(ExitCode: result.ExitCode),

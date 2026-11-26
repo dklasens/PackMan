@@ -22,6 +22,7 @@ public interface IUpdateHistoryStore
     string? LoadIssue { get; }
     IReadOnlyList<UpdateHistoryEntry> Read();
     void Save(UpdateHistoryEntry entry);
+    Task SaveRangeAsync(IReadOnlyList<UpdateHistoryEntry> entries);
 }
 
 public sealed class UpdateHistoryStore : IUpdateHistoryStore
@@ -50,13 +51,25 @@ public sealed class UpdateHistoryStore : IUpdateHistoryStore
 
     public IReadOnlyList<UpdateHistoryEntry> Read() { lock (_sync) return _entries.ToArray(); }
 
-    public void Save(UpdateHistoryEntry entry)
+    public void Save(UpdateHistoryEntry entry) => SaveRange([entry]);
+
+    public Task SaveRangeAsync(IReadOnlyList<UpdateHistoryEntry> entries)
     {
-        entry = entry with { Output = DiagnosticRedactor.Redact(entry.Output),
-            Message = DiagnosticRedactor.Redact(entry.Message), Evidence = DiagnosticRedactor.Redact(entry.Evidence) };
+        if (_path is not null) return Task.Run(() => SaveRange(entries));
+        SaveRange(entries);
+        return Task.CompletedTask;
+    }
+
+    private void SaveRange(IReadOnlyList<UpdateHistoryEntry> entries)
+    {
+        if (entries.Count == 0) return;
+        var changes = entries.Reverse().DistinctBy(entry => entry.Id).Select(entry => entry with {
+            Output = DiagnosticRedactor.Redact(entry.Output), Message = DiagnosticRedactor.Redact(entry.Message),
+            Evidence = DiagnosticRedactor.Redact(entry.Evidence) }).ToList();
+        var ids = changes.Select(entry => entry.Id).ToHashSet();
         lock (_sync)
         {
-            var next = _entries.Where(e => e.Id != entry.Id).Prepend(entry).Take(500).ToList();
+            var next = changes.Concat(_entries.Where(e => !ids.Contains(e.Id))).Take(500).ToList();
             if (_path is not null)
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
@@ -75,13 +88,21 @@ public sealed class UpdateHistoryStore : IUpdateHistoryStore
 
 public static class DiagnosticRedactor
 {
+    // Diagnostic lines can be tens of thousands of characters. Use the linear-time
+    // regex engine so ordinary long lines do not stall the history writer.
+    private const RegexOptions SafeRegex = RegexOptions.NonBacktracking | RegexOptions.CultureInvariant;
+    private static readonly Regex UrlCredentials = new(@"(?i)(https?://)[^\s/@]+:[^\s/@]+@", SafeRegex);
+    private static readonly Regex Bearer = new(@"(?i)(Bearer\s+)\S+", SafeRegex);
+    private static readonly Regex KeyValue = new(@"(?i)((?:[_a-z-]*(?:token|password|passwd|secret|apikey|api_key|api-key|authorization)[_a-z-]*)[""']?\s*[:=]\s*[""']?)[^\s,;""'&]+", SafeRegex);
+    private static readonly Regex Query = new(@"([?&][^\s=&]+)=([^\s&#]+)", SafeRegex);
+
     public static string Redact(string? value)
     {
         if (string.IsNullOrEmpty(value)) return string.Empty;
-        var text = Regex.Replace(value, @"(?i)(https?://)[^\s/@]+:[^\s/@]+@", "$1[redacted]@");
-        text = Regex.Replace(text, @"(?i)(Bearer\s+)\S+", "$1[redacted]");
-        text = Regex.Replace(text, @"(?i)((?:[_a-z-]*(?:token|password|passwd|secret|apikey|api_key|api-key|authorization)[_a-z-]*)[\""']?\s*[:=]\s*[\""']?)[^\s,;\""'&]+", "$1[redacted]");
-        text = Regex.Replace(text, @"([?&][^\s=&]+)=([^\s&#]+)", "$1=[redacted]");
+        var text = UrlCredentials.Replace(value, "$1[redacted]@");
+        text = Bearer.Replace(text, "$1[redacted]");
+        text = KeyValue.Replace(text, "$1[redacted]");
+        text = Query.Replace(text, "$1=[redacted]");
         var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         if (!string.IsNullOrWhiteSpace(profile)) text = text.Replace(profile, "%USERPROFILE%", StringComparison.OrdinalIgnoreCase);
         return text;
